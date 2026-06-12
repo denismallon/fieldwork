@@ -26,15 +26,30 @@ export const FIXED_COLUMNS: ColumnDef[] = [
   { key: "last_funding_date", label: "Last funding date", getValue: (a) => a.last_funding_date },
 ];
 
-/** Placeholder enrichment column headers (no data yet). */
-export const ENRICHMENT_COLUMNS = [
-  "Help centre URL",
-  "Platform",
-  "Help audience",
-  "Agent vendor",
-  "Multilingual",
-  "Raw page count",
-  "Primary page count",
-  "Pass 1",
-  "Score",
+export interface EnrichmentColumnDef extends ColumnDef {
+  /** 1 and 2 are run via the enrichment API; 3 covers inert stub columns. */
+  tier: 1 | 2 | 3;
+}
+
+function multilingualLabel(account: Account): string | null {
+  if (account.multilingual === null) return null;
+  return account.multilingual ? "Yes" : "No";
+}
+
+function agentVendorLabel(account: Account): string | null {
+  if (account.agent_vendor === null) return null;
+  return account.agent_vendor === "none" ? "None" : account.agent_vendor;
+}
+
+/** Enrichment columns, in display and export order. */
+export const ENRICHMENT_COLUMNS: EnrichmentColumnDef[] = [
+  { key: "help_centre_url", label: "Help centre URL", tier: 1, getValue: (a) => a.help_centre_url },
+  { key: "platform", label: "Platform", tier: 1, getValue: (a) => a.platform },
+  { key: "help_audience", label: "Help audience", tier: 1, getValue: (a) => a.help_audience },
+  { key: "agent_vendor", label: "Agent vendor", tier: 1, getValue: agentVendorLabel },
+  { key: "multilingual", label: "Multilingual", tier: 1, getValue: multilingualLabel },
+  { key: "raw_page_count", label: "Raw page count", tier: 2, getValue: (a) => a.raw_page_count },
+  { key: "primary_page_count", label: "Primary page count", tier: 2, getValue: (a) => a.primary_page_count },
+  { key: "pass1", label: "Pass 1", tier: 3, getValue: () => null },
+  { key: "score", label: "Score", tier: 3, getValue: () => null },
 ];

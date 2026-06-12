@@ -6,7 +6,22 @@ export interface FieldworkTable {
   created_at: number;
 }
 
-export interface Account {
+export interface EnrichmentFields {
+  help_centre_url: string | null;
+  help_centre_url_status: string | null;
+  platform: string | null;
+  help_audience: string | null;
+  agent_vendor: string | null;
+  multilingual: number | null;
+  detected_languages: string | null;
+  raw_page_count: number | null;
+  primary_page_count: number | null;
+  page_count_status: string | null;
+  tier1_enriched_at: number | null;
+  tier2_enriched_at: number | null;
+}
+
+export interface Account extends EnrichmentFields {
   id: string;
   table_id: string;
   company_name: string | null;
@@ -23,7 +38,7 @@ export interface Account {
   created_at: number;
 }
 
-export type AccountInput = Omit<Account, "id" | "table_id" | "created_at">;
+export type AccountInput = Omit<Account, "id" | "table_id" | "created_at" | keyof EnrichmentFields>;
 
 export function rowToAccount(row: Row): Account {
   return {
@@ -40,6 +55,19 @@ export function rowToAccount(row: Row): Account {
     hq_country: row.hq_country === null ? null : String(row.hq_country),
     funding_stage: row.funding_stage === null ? null : String(row.funding_stage),
     last_funding_date: row.last_funding_date === null ? null : String(row.last_funding_date),
+    help_centre_url: row.help_centre_url === null ? null : String(row.help_centre_url),
+    help_centre_url_status:
+      row.help_centre_url_status === null ? null : String(row.help_centre_url_status),
+    platform: row.platform === null ? null : String(row.platform),
+    help_audience: row.help_audience === null ? null : String(row.help_audience),
+    agent_vendor: row.agent_vendor === null ? null : String(row.agent_vendor),
+    multilingual: row.multilingual === null ? null : Number(row.multilingual),
+    detected_languages: row.detected_languages === null ? null : String(row.detected_languages),
+    raw_page_count: row.raw_page_count === null ? null : Number(row.raw_page_count),
+    primary_page_count: row.primary_page_count === null ? null : Number(row.primary_page_count),
+    page_count_status: row.page_count_status === null ? null : String(row.page_count_status),
+    tier1_enriched_at: row.tier1_enriched_at === null ? null : Number(row.tier1_enriched_at),
+    tier2_enriched_at: row.tier2_enriched_at === null ? null : Number(row.tier2_enriched_at),
     created_at: Number(row.created_at),
   };
 }

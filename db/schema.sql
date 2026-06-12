@@ -38,6 +38,18 @@ CREATE TABLE IF NOT EXISTS accounts (
   hq_country TEXT,
   funding_stage TEXT,
   last_funding_date TEXT,
+  help_centre_url TEXT,
+  help_centre_url_status TEXT, -- 'found' | 'not_found'
+  platform TEXT,
+  help_audience TEXT, -- 'non-technical' | 'technical' | 'unknown'
+  agent_vendor TEXT, -- comma-separated if multiple, or 'none'
+  multilingual INTEGER, -- 0 | 1
+  detected_languages TEXT, -- JSON: ["en","fr"] after Tier 1, {"en":200,"fr":150} after Tier 2
+  raw_page_count INTEGER,
+  primary_page_count INTEGER,
+  page_count_status TEXT, -- 'found' | 'not_found'
+  tier1_enriched_at INTEGER,
+  tier2_enriched_at INTEGER,
   created_at INTEGER NOT NULL
 );
 

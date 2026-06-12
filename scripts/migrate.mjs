@@ -22,4 +22,31 @@ await client.executeMultiple(schema);
 
 console.log("Schema applied successfully.");
 
+// `CREATE TABLE IF NOT EXISTS` won't add new columns to an existing table, so
+// reconcile the accounts table with any columns added since it was created.
+const ENRICHMENT_COLUMNS = [
+  ["help_centre_url", "TEXT"],
+  ["help_centre_url_status", "TEXT"],
+  ["platform", "TEXT"],
+  ["help_audience", "TEXT"],
+  ["agent_vendor", "TEXT"],
+  ["multilingual", "INTEGER"],
+  ["detected_languages", "TEXT"],
+  ["raw_page_count", "INTEGER"],
+  ["primary_page_count", "INTEGER"],
+  ["page_count_status", "TEXT"],
+  ["tier1_enriched_at", "INTEGER"],
+  ["tier2_enriched_at", "INTEGER"],
+];
+
+const tableInfo = await client.execute("PRAGMA table_info(accounts)");
+const existingColumns = new Set(tableInfo.rows.map((row) => String(row.name)));
+
+for (const [name, type] of ENRICHMENT_COLUMNS) {
+  if (!existingColumns.has(name)) {
+    await client.execute(`ALTER TABLE accounts ADD COLUMN ${name} ${type}`);
+    console.log(`Added column accounts.${name}`);
+  }
+}
+
 client.close();
