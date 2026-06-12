@@ -21,6 +21,8 @@ export async function requestMagicLink(
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
 
+  console.log("[requestMagicLink] email:", JSON.stringify(email), "allowedEmails:", JSON.stringify(allowedEmails));
+
   if (email && allowedEmails.includes(email)) {
     const token = crypto.randomUUID() + crypto.randomUUID();
     const now = nowInSeconds();
