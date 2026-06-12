@@ -21,7 +21,7 @@ export async function sendMagicLinkEmail(email: string, token: string): Promise<
 
   const verifyUrl = `${appUrl}/auth/verify?token=${token}`;
 
-  await getResendClient().emails.send({
+  const { error } = await getResendClient().emails.send({
     from,
     to: email,
     replyTo: replyTo || undefined,
@@ -32,4 +32,8 @@ export async function sendMagicLinkEmail(email: string, token: string): Promise<
       <p>This link expires in 15 minutes. If you didn't request it, you can ignore this email.</p>
     `,
   });
+
+  if (error) {
+    throw new Error(`Resend error: ${error.name} - ${error.message}`);
+  }
 }
