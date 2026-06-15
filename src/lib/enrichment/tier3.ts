@@ -263,7 +263,17 @@ ${articleSample || "No articles could be retrieved."}`;
 }
 
 function parseAnalysisJson(text: string): HaikuAnalysis {
-  const parsed = JSON.parse(text) as Record<string, unknown>;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(text) as Record<string, unknown>;
+  } catch (error) {
+    throw new Error(
+      `Invalid Tier 3 analysis JSON: ${error instanceof Error ? error.message : String(error)}. Response: ${text.slice(
+        0,
+        500,
+      )}`,
+    );
+  }
 
   if (
     typeof parsed.release_velocity !== "string" ||
@@ -305,7 +315,10 @@ async function callHaiku(userPrompt: string): Promise<HaikuAnalysis> {
     }),
   });
 
-  if (!res.ok) throw new Error(`Anthropic request failed: ${res.status}`);
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Anthropic request failed: ${res.status} ${body.slice(0, 500)}`);
+  }
 
   const data = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
   const text = data.content?.find((part) => part.type === "text")?.text;
@@ -324,8 +337,14 @@ async function analyzeWithHaiku(
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       return await callHaiku(userPrompt);
-    } catch {
-      // Retry once for malformed JSON or transient API failures.
+    } catch (error) {
+      console.error("Tier 3 Haiku analysis failed", {
+        domain,
+        attempt: attempt + 1,
+        hasChangelogContent: changelogContent.length > 0,
+        hasArticleSample: articleSample.length > 0,
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 
