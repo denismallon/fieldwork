@@ -262,10 +262,23 @@ ARTICLE SAMPLE (up to 5 articles):
 ${articleSample || "No articles could be retrieved."}`;
 }
 
+function extractJsonObject(text: string): string {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fenced) return fenced[1].trim();
+
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start !== -1 && end > start) return trimmed.slice(start, end + 1);
+
+  return trimmed;
+}
+
 function parseAnalysisJson(text: string): HaikuAnalysis {
   let parsed: Record<string, unknown>;
+  const jsonText = extractJsonObject(text);
   try {
-    parsed = JSON.parse(text) as Record<string, unknown>;
+    parsed = JSON.parse(jsonText) as Record<string, unknown>;
   } catch (error) {
     throw new Error(
       `Invalid Tier 3 analysis JSON: ${error instanceof Error ? error.message : String(error)}. Response: ${text.slice(
