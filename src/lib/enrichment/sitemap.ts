@@ -3,11 +3,13 @@ import { fetchWithTimeout } from "./utils";
 
 export interface SitemapResult {
   urls: string[];
+  lastmods: Record<string, string>;
   status: "found" | "not_found";
 }
 
 interface ParsedSitemap {
   urls: string[];
+  lastmods: Record<string, string>;
   isIndex: boolean;
 }
 
@@ -20,12 +22,18 @@ async function fetchSitemap(url: string): Promise<ParsedSitemap | null> {
 
   const $ = cheerio.load(text, { xmlMode: true });
   const isIndex = $("sitemapindex").length > 0;
-  const urls = $("loc")
-    .map((_, el) => $(el).text().trim())
-    .get()
-    .filter(Boolean);
+  const urls: string[] = [];
+  const lastmods: Record<string, string> = {};
 
-  return { urls, isIndex };
+  $("url, sitemap").each((_, el) => {
+    const loc = $(el).find("loc").first().text().trim();
+    if (!loc) return;
+    urls.push(loc);
+    const lastmod = $(el).find("lastmod").first().text().trim();
+    if (lastmod) lastmods[loc] = lastmod;
+  });
+
+  return { urls, lastmods, isIndex };
 }
 
 export async function discoverSitemap(helpCentreUrl: string, platform: string | null): Promise<SitemapResult> {
@@ -48,18 +56,22 @@ export async function discoverSitemap(helpCentreUrl: string, platform: string | 
 
     if (sitemap.isIndex) {
       const allUrls: string[] = [];
+      const allLastmods: Record<string, string> = {};
       for (const childUrl of sitemap.urls) {
         const child = await fetchSitemap(childUrl);
-        if (child) allUrls.push(...child.urls);
+        if (child) {
+          allUrls.push(...child.urls);
+          Object.assign(allLastmods, child.lastmods);
+        }
       }
-      if (allUrls.length > 0) return { urls: allUrls, status: "found" };
+      if (allUrls.length > 0) return { urls: allUrls, lastmods: allLastmods, status: "found" };
       continue;
     }
 
-    if (sitemap.urls.length > 0) return { urls: sitemap.urls, status: "found" };
+    if (sitemap.urls.length > 0) return { urls: sitemap.urls, lastmods: sitemap.lastmods, status: "found" };
   }
 
-  return { urls: [], status: "not_found" };
+  return { urls: [], lastmods: {}, status: "not_found" };
 }
 
 /**

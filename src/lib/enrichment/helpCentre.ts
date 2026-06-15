@@ -10,7 +10,7 @@ const SUBDOMAIN_PREFIXES = ["help", "support", "docs", "kb"];
 const PATH_CANDIDATES = ["/hc", "/help", "/support", "/docs", "/knowledge-base"];
 const NAV_KEYWORDS = ["help", "support", "docs", "knowledge", "hc"];
 
-function pathOf(url: string): string {
+export function pathOf(url: string): string {
   try {
     return new URL(url).pathname;
   } catch {
@@ -18,7 +18,7 @@ function pathOf(url: string): string {
   }
 }
 
-interface ProbeSignature {
+export interface ProbeSignature {
   status: number;
   etag: string | null;
   length: string | null;
@@ -30,7 +30,7 @@ interface ProbeSignature {
  * 200 with the same shell HTML for any path (client-side routing), which
  * makes "200 OK" useless as a signal that a candidate path is real.
  */
-async function probeUnknownPath(rootDomain: string): Promise<ProbeSignature | null> {
+export async function probeUnknownPath(rootDomain: string): Promise<ProbeSignature | null> {
   const probePath = `/fieldwork-probe-${Math.random().toString(36).slice(2, 10)}`;
   const res = await fetchWithTimeout(`https://${rootDomain}${probePath}`, { method: "HEAD" });
   if (!res) return null;
@@ -43,7 +43,7 @@ async function probeUnknownPath(rootDomain: string): Promise<ProbeSignature | nu
 }
 
 /** True if `res` looks like the same catch-all response as the unknown-path probe. */
-function matchesProbe(res: Response, probe: ProbeSignature | null): boolean {
+export function matchesProbe(res: Response, probe: ProbeSignature | null): boolean {
   if (!probe || res.status !== probe.status) return false;
   if (probe.etag && res.headers.get("etag") === probe.etag) return true;
   if (probe.length && res.headers.get("content-length") === probe.length) return true;

@@ -1,18 +1,20 @@
 import { db } from "@/lib/db";
 import { nowInSeconds } from "@/lib/auth";
 import { rowToAccount } from "@/lib/types";
-import { runTier2 } from "@/lib/enrichment/tier2";
+import { runTier3, type Tier3Result } from "@/lib/enrichment/tier3";
 import { recalculateScore } from "@/lib/scoring";
 import { sleep } from "@/lib/enrichment/utils";
 
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
-const FAILED_RESULT = {
-  raw_page_count: null,
-  primary_page_count: null,
-  page_count_status: "not_found" as const,
-  detected_languages: null,
+const FAILED_RESULT: Tier3Result = {
+  changelog_url: null,
+  release_velocity: "unknown",
+  release_velocity_source: "unknown",
+  freshness_signal: "unknown",
+  freshness_confidence: "unmeasurable",
+  freshness_source: "unknown",
 };
 
 export async function POST(request: Request) {
@@ -22,7 +24,7 @@ export async function POST(request: Request) {
     sql: "SELECT * FROM accounts WHERE table_id = ? ORDER BY created_at ASC",
     args: [tableId],
   });
-  const accounts = dbResult.rows.map(rowToAccount).filter((a) => a.help_centre_url_status === "found");
+  const accounts = dbResult.rows.map(rowToAccount).filter((a) => a.domain);
 
   const stream = new ReadableStream({
     async start(controller) {
@@ -35,40 +37,46 @@ export async function POST(request: Request) {
         if (i > 0) await sleep(500);
         const account = accounts[i];
 
-        let tier2Result;
+        let tier3Result: Tier3Result;
         try {
-          tier2Result = await runTier2(account);
+          tier3Result = await runTier3(account);
         } catch {
-          tier2Result = FAILED_RESULT;
+          tier3Result = FAILED_RESULT;
         }
 
         await db.execute({
           sql: `UPDATE accounts SET
-              raw_page_count = ?,
-              primary_page_count = ?,
-              page_count_status = ?,
-              detected_languages = COALESCE(?, detected_languages),
-              tier2_enriched_at = ?
+              changelog_url = ?,
+              release_velocity = ?,
+              release_velocity_source = ?,
+              freshness_signal = ?,
+              freshness_confidence = ?,
+              freshness_source = ?,
+              tier3_enriched_at = ?
             WHERE id = ?`,
           args: [
-            tier2Result.raw_page_count,
-            tier2Result.primary_page_count,
-            tier2Result.page_count_status,
-            tier2Result.detected_languages,
+            tier3Result.changelog_url,
+            tier3Result.release_velocity,
+            tier3Result.release_velocity_source,
+            tier3Result.freshness_signal,
+            tier3Result.freshness_confidence,
+            tier3Result.freshness_source,
             nowInSeconds(),
             account.id,
           ],
         });
 
-        send({ accountId: account.id, field: "raw_page_count", value: tier2Result.raw_page_count });
-        send({ accountId: account.id, field: "primary_page_count", value: tier2Result.primary_page_count });
-        send({ accountId: account.id, field: "page_count_status", value: tier2Result.page_count_status });
+        send({ accountId: account.id, field: "changelog_url", value: tier3Result.changelog_url });
+        send({ accountId: account.id, field: "release_velocity", value: tier3Result.release_velocity });
+        send({ accountId: account.id, field: "freshness_signal", value: tier3Result.freshness_signal });
+        send({ accountId: account.id, field: "freshness_confidence", value: tier3Result.freshness_confidence });
 
         const scoreResult = await recalculateScore(account.id);
         send({ accountId: account.id, field: "pass1", value: scoreResult.pass1 });
         send({ accountId: account.id, field: "score", value: scoreResult.score });
         send({ accountId: account.id, field: "score_confidence", value: scoreResult.score_confidence });
         send({ accountId: account.id, field: "score_flags", value: JSON.stringify(scoreResult.score_flags) });
+        send({ accountId: account.id, field: "tier3_enriched_at", value: nowInSeconds() });
       }
 
       controller.close();

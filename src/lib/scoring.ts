@@ -1,0 +1,134 @@
+import { db } from "./db";
+import { rowToAccount, type Account } from "./types";
+
+export interface ScoreResult {
+  pass1: number | null;
+  score: number | null;
+  score_confidence: string | null;
+  score_flags: string[];
+}
+
+const PAGE_COUNT_LOW_BAND = [280, 320] as const;
+const PAGE_COUNT_HIGH_BAND = [1900, 2100] as const;
+
+function computePass1(account: Account): number | null {
+  if (account.help_centre_url_status === null) return null;
+  if (account.help_centre_url_status !== "found") return 0;
+  if (account.primary_page_count === null) return null;
+  return account.primary_page_count >= 300 && account.primary_page_count <= 2000 ? 1 : 0;
+}
+
+function computeAgentVendorScore(account: Account): number {
+  return account.agent_vendor && account.agent_vendor !== "none" ? 30 : 0;
+}
+
+function computeMultilingualScore(account: Account): number {
+  return account.multilingual === 1 ? 20 : 0;
+}
+
+function computeFundingScore(account: Account): number {
+  if (!account.last_funding_date) return 0;
+  const fundingDate = new Date(account.last_funding_date);
+  if (Number.isNaN(fundingDate.getTime())) return 0;
+
+  const now = new Date();
+  const months = (now.getFullYear() - fundingDate.getFullYear()) * 12 + (now.getMonth() - fundingDate.getMonth());
+  if (months <= 24) return 10;
+  if (months <= 48) return 5;
+  return 0;
+}
+
+const DRIFT_MATRIX: Record<string, Record<string, number>> = {
+  high: { fresh: 0, stale: 32, very_stale: 40 },
+  medium: { fresh: 0, stale: 20, very_stale: 28 },
+  low: { fresh: 0, stale: 5, very_stale: 10 },
+};
+
+/**
+ * "Unknown"/"unmeasurable" (whether explicitly recorded by Tier 3 or simply
+ * not yet measured) must never be read as evidence of low velocity or
+ * staleness — both collapse to the neutral midpoint, with a flag added only
+ * once Tier 3 has explicitly confirmed the signal is unusable.
+ */
+function computeDriftRatio(account: Account, flags: string[]): number {
+  const velocity = account.release_velocity;
+  const freshness = account.freshness_signal;
+  const freshnessConfidence = account.freshness_confidence;
+
+  if (freshnessConfidence === "unmeasurable") {
+    flags.push("Freshness unmeasurable: likely migration artifact — verify manually");
+  }
+  if (velocity === "unknown") {
+    flags.push("Release velocity unknown: no dated changelog found");
+  }
+
+  if (!velocity || velocity === "unknown" || !freshnessConfidence || freshnessConfidence === "unmeasurable") {
+    return 20;
+  }
+  if (!freshness || freshness === "unknown") return 20;
+
+  return DRIFT_MATRIX[velocity]?.[freshness] ?? 20;
+}
+
+/**
+ * Null fields (Tier 3 not yet run) are treated as the most cautious enum
+ * value ('unknown' / 'unmeasurable') so an incremental partial score is
+ * always reported with low confidence until Tier 3 actually runs.
+ */
+function computeScoreConfidence(account: Account): "high" | "medium" | "low" {
+  const freshnessConfidence = account.freshness_confidence ?? "unmeasurable";
+  const velocity = account.release_velocity ?? "unknown";
+
+  if (freshnessConfidence === "unmeasurable") return "low";
+  if (freshnessConfidence === "low" || velocity === "unknown") return "medium";
+  // freshness_confidence is 'high'|'medium', velocity != 'unknown', and
+  // help_centre_url_status === 'found' is guaranteed by pass1 === 1.
+  return "high";
+}
+
+export function computeScoreResult(account: Account): ScoreResult {
+  const pass1 = computePass1(account);
+  const flags: string[] = [];
+
+  const ppc = account.primary_page_count;
+  if (
+    ppc !== null &&
+    ((ppc >= PAGE_COUNT_LOW_BAND[0] && ppc <= PAGE_COUNT_LOW_BAND[1]) ||
+      (ppc >= PAGE_COUNT_HIGH_BAND[0] && ppc <= PAGE_COUNT_HIGH_BAND[1]))
+  ) {
+    flags.push("Page count near Pass 1 threshold — verify before outreach");
+  }
+
+  if (pass1 !== 1) {
+    return { pass1, score: null, score_confidence: null, score_flags: flags };
+  }
+
+  const score =
+    computeAgentVendorScore(account) +
+    computeDriftRatio(account, flags) +
+    computeMultilingualScore(account) +
+    computeFundingScore(account);
+
+  return { pass1, score, score_confidence: computeScoreConfidence(account), score_flags: flags };
+}
+
+/** Re-reads the row, recomputes pass1/score/confidence/flags, and persists them. */
+export async function recalculateScore(accountId: string): Promise<ScoreResult> {
+  const result = await db.execute({ sql: "SELECT * FROM accounts WHERE id = ?", args: [accountId] });
+  const account = rowToAccount(result.rows[0]);
+
+  const scoreResult = computeScoreResult(account);
+
+  await db.execute({
+    sql: `UPDATE accounts SET pass1 = ?, score = ?, score_confidence = ?, score_flags = ? WHERE id = ?`,
+    args: [
+      scoreResult.pass1,
+      scoreResult.score,
+      scoreResult.score_confidence,
+      JSON.stringify(scoreResult.score_flags),
+      accountId,
+    ],
+  });
+
+  return scoreResult;
+}

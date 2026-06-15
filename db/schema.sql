@@ -49,8 +49,19 @@ CREATE TABLE IF NOT EXISTS accounts (
   raw_page_count INTEGER,
   primary_page_count INTEGER,
   page_count_status TEXT, -- 'found' | 'not_found'
+  changelog_url TEXT,
+  release_velocity TEXT, -- 'high' | 'medium' | 'low' | 'unknown'
+  release_velocity_source TEXT, -- 'dedicated_tool' | 'rss' | 'blog' | 'unknown'
+  freshness_signal TEXT, -- 'fresh' | 'stale' | 'very_stale' | 'unknown'
+  freshness_confidence TEXT, -- 'high' | 'medium' | 'low' | 'unmeasurable'
+  freshness_source TEXT, -- 'in_content' | 'sitemap_lastmod' | 'http_header' | 'unknown'
+  pass1 INTEGER, -- 1 (pass) | 0 (fail) | NULL (insufficient data)
+  score INTEGER, -- 0-100 | NULL (pass1 not met or data insufficient)
+  score_confidence TEXT, -- 'high' | 'medium' | 'low'
+  score_flags TEXT, -- JSON array of human-review warning strings
   tier1_enriched_at INTEGER,
   tier2_enriched_at INTEGER,
+  tier3_enriched_at INTEGER,
   created_at INTEGER NOT NULL
 );
 

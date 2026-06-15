@@ -2,6 +2,7 @@ import { db } from "@/lib/db";
 import { nowInSeconds } from "@/lib/auth";
 import { rowToAccount } from "@/lib/types";
 import { runTier1 } from "@/lib/enrichment/tier1";
+import { recalculateScore } from "@/lib/scoring";
 import { sleep } from "@/lib/enrichment/utils";
 
 export const runtime = "nodejs";
@@ -77,6 +78,12 @@ export async function POST(request: Request) {
         send({ accountId: account.id, field: "agent_vendor", value: signals.agent_vendor });
         send({ accountId: account.id, field: "multilingual", value: signals.multilingual });
         send({ accountId: account.id, field: "requires_login", value: signals.requires_login });
+
+        const scoreResult = await recalculateScore(account.id);
+        send({ accountId: account.id, field: "pass1", value: scoreResult.pass1 });
+        send({ accountId: account.id, field: "score", value: scoreResult.score });
+        send({ accountId: account.id, field: "score_confidence", value: scoreResult.score_confidence });
+        send({ accountId: account.id, field: "score_flags", value: JSON.stringify(scoreResult.score_flags) });
       }
 
       controller.close();

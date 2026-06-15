@@ -46,6 +46,47 @@ function authenticationLabel(account: Account): string | null {
   return account.requires_login ? "Required" : "Not required";
 }
 
+const RELEASE_VELOCITY_LABELS: Record<string, string> = {
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+  unknown: "Unknown",
+};
+
+const FRESHNESS_SIGNAL_LABELS: Record<string, string> = {
+  fresh: "Fresh",
+  stale: "Stale",
+  very_stale: "Very stale",
+  unknown: "Unknown",
+};
+
+const FRESHNESS_CONFIDENCE_LABELS: Record<string, string> = {
+  high: "High",
+  medium: "Medium",
+  low: "Low",
+  unmeasurable: "Unmeasurable",
+};
+
+function releaseVelocityLabel(account: Account): string | null {
+  if (account.release_velocity === null) return null;
+  return RELEASE_VELOCITY_LABELS[account.release_velocity] ?? account.release_velocity;
+}
+
+function freshnessSignalLabel(account: Account): string | null {
+  if (account.freshness_signal === null) return null;
+  return FRESHNESS_SIGNAL_LABELS[account.freshness_signal] ?? account.freshness_signal;
+}
+
+function freshnessConfidenceLabel(account: Account): string | null {
+  if (account.freshness_confidence === null) return null;
+  return FRESHNESS_CONFIDENCE_LABELS[account.freshness_confidence] ?? account.freshness_confidence;
+}
+
+function pass1Label(account: Account): string | null {
+  if (account.pass1 === null) return null;
+  return account.pass1 === 1 ? "Pass" : "Fail";
+}
+
 /** Enrichment columns, in display and export order. */
 export const ENRICHMENT_COLUMNS: EnrichmentColumnDef[] = [
   { key: "help_centre_url", label: "Help centre URL", tier: 1, getValue: (a) => a.help_centre_url },
@@ -56,6 +97,10 @@ export const ENRICHMENT_COLUMNS: EnrichmentColumnDef[] = [
   { key: "requires_login", label: "Authentication", tier: 1, getValue: authenticationLabel },
   { key: "raw_page_count", label: "Raw page count", tier: 2, getValue: (a) => a.raw_page_count },
   { key: "primary_page_count", label: "Primary page count", tier: 2, getValue: (a) => a.primary_page_count },
-  { key: "pass1", label: "Pass 1", tier: 3, getValue: () => null },
-  { key: "score", label: "Score", tier: 3, getValue: () => null },
+  { key: "changelog_url", label: "Changelog URL", tier: 3, getValue: (a) => a.changelog_url },
+  { key: "release_velocity", label: "Release velocity", tier: 3, getValue: releaseVelocityLabel },
+  { key: "freshness_signal", label: "Freshness signal", tier: 3, getValue: freshnessSignalLabel },
+  { key: "freshness_confidence", label: "Freshness confidence", tier: 3, getValue: freshnessConfidenceLabel },
+  { key: "pass1", label: "Pass 1", tier: 3, getValue: pass1Label },
+  { key: "score", label: "Score (partial)", tier: 3, getValue: (a) => a.score },
 ];

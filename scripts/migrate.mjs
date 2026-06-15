@@ -36,8 +36,19 @@ const ENRICHMENT_COLUMNS = [
   ["raw_page_count", "INTEGER"],
   ["primary_page_count", "INTEGER"],
   ["page_count_status", "TEXT"],
+  ["changelog_url", "TEXT"],
+  ["release_velocity", "TEXT"],
+  ["release_velocity_source", "TEXT"],
+  ["freshness_signal", "TEXT"],
+  ["freshness_confidence", "TEXT"],
+  ["freshness_source", "TEXT"],
+  ["pass1", "INTEGER"],
+  ["score", "INTEGER"],
+  ["score_confidence", "TEXT"],
+  ["score_flags", "TEXT"],
   ["tier1_enriched_at", "INTEGER"],
   ["tier2_enriched_at", "INTEGER"],
+  ["tier3_enriched_at", "INTEGER"],
 ];
 
 const tableInfo = await client.execute("PRAGMA table_info(accounts)");

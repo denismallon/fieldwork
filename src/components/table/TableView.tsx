@@ -10,6 +10,9 @@ import { renameTable, deleteAccounts } from "@/app/(app)/tables/[id]/actions";
 
 type SortDirection = "asc" | "desc";
 
+/** Tier 3 columns flaky enough to need an individual run icon (pass1/score are pure derived columns). */
+const TIER3_RUN_ICON_KEYS = new Set(["changelog_url", "release_velocity", "freshness_signal", "freshness_confidence"]);
+
 interface TableViewProps {
   table: { id: string; name: string };
   initialAccounts: Account[];
@@ -91,6 +94,48 @@ function CellPlaceholder() {
   return <span className="inline-block h-3 w-16 animate-pulse rounded bg-gray-200" />;
 }
 
+function Pass1Badge({ pass1 }: { pass1: number | null }) {
+  if (pass1 === null) return <span className="text-gray-300">—</span>;
+  if (pass1 === 1) {
+    return <span className="rounded-full bg-green-100 px-2 py-0.5 text-xs font-medium text-green-800">Pass</span>;
+  }
+  return <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-800">Fail</span>;
+}
+
+const SCORE_CONFIDENCE_DOT_COLORS: Record<string, string> = {
+  high: "bg-green-500",
+  medium: "bg-amber-500",
+  low: "bg-red-500",
+};
+
+function ScoreCell({ account }: { account: Account }) {
+  if (account.score === null) return <span className="text-gray-300">—</span>;
+
+  const isPartial = account.tier3_enriched_at === null;
+  const confidence = account.score_confidence;
+  const dotColor = (confidence && SCORE_CONFIDENCE_DOT_COLORS[confidence]) || "bg-gray-300";
+
+  let flags: string[] = [];
+  if (confidence === "low" && account.score_flags) {
+    try {
+      const parsed = JSON.parse(account.score_flags);
+      if (Array.isArray(parsed)) flags = parsed;
+    } catch {
+      // ignore malformed JSON
+    }
+  }
+
+  return (
+    <span className={`inline-flex items-center gap-1.5 ${isPartial ? "text-gray-400" : "text-gray-700"}`}>
+      <span>{account.score}</span>
+      <span
+        className={`inline-block h-2 w-2 rounded-full ${dotColor}`}
+        title={flags.length > 0 ? flags.join("\n") : undefined}
+      />
+    </span>
+  );
+}
+
 function AudienceBadge({ audience }: { audience: string | null }) {
   if (!audience) return <span className="text-gray-300">—</span>;
 
@@ -146,6 +191,29 @@ function EnrichmentCell({ account, column }: { account: Account; column: Enrichm
       const value = column.key === "raw_page_count" ? account.raw_page_count : account.primary_page_count;
       return value === null ? <span className="text-gray-300">—</span> : <span>{value.toLocaleString()}</span>;
     }
+    case "changelog_url":
+      if (!account.changelog_url) return <span className="text-gray-300">—</span>;
+      return (
+        <a
+          href={account.changelog_url}
+          target="_blank"
+          rel="noreferrer"
+          title={account.changelog_url}
+          className="block max-w-[220px] truncate text-blue-600 hover:underline"
+        >
+          {account.changelog_url}
+        </a>
+      );
+    case "release_velocity":
+    case "freshness_signal":
+    case "freshness_confidence": {
+      const label = column.getValue(account);
+      return label !== null ? <span>{label}</span> : <span className="text-gray-300">—</span>;
+    }
+    case "pass1":
+      return <Pass1Badge pass1={account.pass1} />;
+    case "score":
+      return <ScoreCell account={account} />;
     default:
       return <span className="text-gray-300">—</span>;
   }
@@ -173,8 +241,10 @@ export default function TableView({
 
   const [tier1Running, setTier1Running] = useState(false);
   const [tier2Running, setTier2Running] = useState(false);
+  const [tier3Running, setTier3Running] = useState(false);
   const [pendingTier1, setPendingTier1] = useState<Set<string>>(new Set());
   const [pendingTier2, setPendingTier2] = useState<Set<string>>(new Set());
+  const [pendingTier3, setPendingTier3] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     if (importedCount !== null) {
@@ -281,7 +351,7 @@ export default function TableView({
   }
 
   async function runTier1() {
-    if (tier1Running || tier2Running) return;
+    if (tier1Running || tier2Running || tier3Running) return;
     setTier1Running(true);
     setPendingTier1(new Set(accounts.filter((a) => a.domain).map((a) => a.id)));
 
@@ -303,7 +373,7 @@ export default function TableView({
   }
 
   async function runTier2() {
-    if (tier1Running || tier2Running) return;
+    if (tier1Running || tier2Running || tier3Running) return;
     setTier2Running(true);
     setPendingTier2(new Set(accounts.filter((a) => a.help_centre_url_status === "found").map((a) => a.id)));
 
@@ -324,8 +394,31 @@ export default function TableView({
     }
   }
 
+  async function runTier3() {
+    if (tier1Running || tier2Running || tier3Running) return;
+    setTier3Running(true);
+    setPendingTier3(new Set(accounts.filter((a) => a.domain).map((a) => a.id)));
+
+    try {
+      const res = await fetch("/api/enrich/tier3", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tableId: table.id }),
+      });
+      if (!res.ok || !res.body) throw new Error("Tier 3 enrichment request failed");
+
+      await consumeEventStream(res, (event) => applyEnrichmentEvent(event, setPendingTier3));
+    } catch {
+      toast.error("Tier 3 enrichment failed.");
+    } finally {
+      setTier3Running(false);
+      setPendingTier3(new Set());
+    }
+  }
+
   const allSelected = accounts.length > 0 && selectedIds.size === accounts.length;
   const hasHelpCentreUrl = accounts.some((a) => a.help_centre_url);
+  const hasTier2Run = accounts.some((a) => a.tier2_enriched_at !== null);
 
   return (
     <div>
@@ -430,7 +523,7 @@ export default function TableView({
                     {column.tier === 1 && (
                       <RunIcon
                         onClick={runTier1}
-                        disabled={tier1Running || tier2Running}
+                        disabled={tier1Running || tier2Running || tier3Running}
                         loading={tier1Running}
                         title="Run Tier 1 enrichment for all rows"
                       />
@@ -438,12 +531,24 @@ export default function TableView({
                     {column.tier === 2 && (
                       <RunIcon
                         onClick={runTier2}
-                        disabled={tier1Running || tier2Running || !hasHelpCentreUrl}
+                        disabled={tier1Running || tier2Running || tier3Running || !hasHelpCentreUrl}
                         loading={tier2Running}
                         title={
                           hasHelpCentreUrl
                             ? "Run Tier 2 enrichment for all rows"
                             : "Run Tier 1 first to discover help centres"
+                        }
+                      />
+                    )}
+                    {column.tier === 3 && TIER3_RUN_ICON_KEYS.has(column.key) && (
+                      <RunIcon
+                        onClick={runTier3}
+                        disabled={tier1Running || tier2Running || tier3Running || !hasTier2Run}
+                        loading={tier3Running}
+                        title={
+                          hasTier2Run
+                            ? "Run Tier 3 enrichment for all rows"
+                            : "Run Tier 2 first to count pages"
                         }
                       />
                     )}
@@ -474,7 +579,8 @@ export default function TableView({
                 {ENRICHMENT_COLUMNS.map((column) => (
                   <td key={column.key} className="bg-gray-50 px-3 py-2 text-gray-700">
                     {(column.tier === 1 && pendingTier1.has(account.id)) ||
-                    (column.tier === 2 && pendingTier2.has(account.id)) ? (
+                    (column.tier === 2 && pendingTier2.has(account.id)) ||
+                    (column.tier === 3 && pendingTier3.has(account.id)) ? (
                       <CellPlaceholder />
                     ) : (
                       <EnrichmentCell account={account} column={column} />
