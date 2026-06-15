@@ -18,13 +18,47 @@ function pathOf(url: string): string {
   }
 }
 
+interface ProbeSignature {
+  status: number;
+  etag: string | null;
+  length: string | null;
+}
+
+/**
+ * Fetches a path that almost certainly doesn't exist, to fingerprint how the
+ * server responds to unknown routes. Single-page-app servers often return a
+ * 200 with the same shell HTML for any path (client-side routing), which
+ * makes "200 OK" useless as a signal that a candidate path is real.
+ */
+async function probeUnknownPath(rootDomain: string): Promise<ProbeSignature | null> {
+  const probePath = `/fieldwork-probe-${Math.random().toString(36).slice(2, 10)}`;
+  const res = await fetchWithTimeout(`https://${rootDomain}${probePath}`, { method: "HEAD" });
+  if (!res) return null;
+
+  return {
+    status: res.status,
+    etag: res.headers.get("etag"),
+    length: res.headers.get("content-length"),
+  };
+}
+
+/** True if `res` looks like the same catch-all response as the unknown-path probe. */
+function matchesProbe(res: Response, probe: ProbeSignature | null): boolean {
+  if (!probe || res.status !== probe.status) return false;
+  if (probe.etag && res.headers.get("etag") === probe.etag) return true;
+  if (probe.length && res.headers.get("content-length") === probe.length) return true;
+  return false;
+}
+
 /**
  * A candidate resolves only if it returns 2xx, doesn't redirect back to the
- * bare root domain's homepage (the usual signal of a catch-all/404 page), and
+ * bare root domain's homepage (the usual signal of a catch-all/404 page),
  * doesn't land on a www subdomain (help centres rarely live there, and a
- * redirect to www is usually just a bounce back to the marketing site).
+ * redirect to www is usually just a bounce back to the marketing site), and
+ * isn't indistinguishable from the root domain's response to an unknown path
+ * (the usual signal of an SPA catch-all route).
  */
-async function checkCandidate(url: string, rootDomain: string): Promise<string | null> {
+async function checkCandidate(url: string, rootDomain: string, probe: ProbeSignature | null): Promise<string | null> {
   const res = await fetchWithTimeout(url, { method: "HEAD" });
   if (!res || !res.ok) return null;
 
@@ -36,22 +70,24 @@ async function checkCandidate(url: string, rootDomain: string): Promise<string |
 
   const isRootPath = finalPath === "" || finalPath === "/";
   if (finalHost === rootDomain && isRootPath) return null;
+  if (finalHost === rootDomain && matchesProbe(res, probe)) return null;
 
   return finalUrl;
 }
 
 export async function discoverHelpCentre(domain: string): Promise<HelpCentreResult> {
   const rootDomain = domain.replace(/^www\./i, "").toLowerCase();
+  const probe = await probeUnknownPath(rootDomain);
 
   // Step 1: common subdomains
   for (const prefix of SUBDOMAIN_PREFIXES) {
-    const found = await checkCandidate(`https://${prefix}.${rootDomain}`, rootDomain);
+    const found = await checkCandidate(`https://${prefix}.${rootDomain}`, rootDomain, probe);
     if (found) return { url: found, status: "found" };
   }
 
   // Step 2: common paths
   for (const path of PATH_CANDIDATES) {
-    const found = await checkCandidate(`https://${rootDomain}${path}`, rootDomain);
+    const found = await checkCandidate(`https://${rootDomain}${path}`, rootDomain, probe);
     if (found) return { url: found, status: "found" };
   }
 
@@ -66,7 +102,7 @@ export async function discoverHelpCentre(domain: string): Promise<HelpCentreResu
         const base = `${sitemapUrl.protocol}//${sitemapUrl.host}`;
         const baseHost = hostOf(base);
         if (baseHost !== rootDomain && baseHost !== `www.${rootDomain}`) {
-          const found = await checkCandidate(base, rootDomain);
+          const found = await checkCandidate(base, rootDomain, probe);
           if (found) return { url: found, status: "found" };
         }
       } catch {
@@ -96,7 +132,7 @@ export async function discoverHelpCentre(domain: string): Promise<HelpCentreResu
     });
 
     for (const candidate of candidates) {
-      const found = await checkCandidate(candidate, rootDomain);
+      const found = await checkCandidate(candidate, rootDomain, probe);
       if (found) return { url: found, status: "found" };
     }
   }
