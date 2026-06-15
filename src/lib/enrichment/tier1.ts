@@ -26,8 +26,17 @@ const EMPTY_SIGNALS = {
 export async function runTier1(domain: string): Promise<Tier1Result> {
   const helpCentre = await discoverHelpCentre(domain);
 
+  // Fetched up front and checked regardless of help centre status: chat/AI
+  // agent widgets are usually embedded site-wide on the main site, even when
+  // the help centre (often a separate third-party platform) has none.
+  const homeRes = await fetchWithTimeout(`https://${domain}/`);
+  const homeHtml = homeRes && homeRes.ok ? await homeRes.text() : null;
+  const home$ = homeHtml ? cheerio.load(homeHtml) : null;
+
   if (helpCentre.status === "not_found" || !helpCentre.url) {
-    return { help_centre_url: null, help_centre_url_status: "not_found", ...EMPTY_SIGNALS };
+    const gtm = await fetchGtmContainers(homeHtml ? [homeHtml] : []);
+    const agent_vendor = detectAgentVendor(home$ ? [home$] : [], gtm);
+    return { help_centre_url: null, help_centre_url_status: "not_found", ...EMPTY_SIGNALS, agent_vendor };
   }
 
   const res = await fetchWithTimeout(helpCentre.url);
@@ -35,10 +44,13 @@ export async function runTier1(domain: string): Promise<Tier1Result> {
     // A 401/403 on the help centre itself is a strong login-wall signal;
     // other failures (timeouts, 5xx) don't tell us anything about auth.
     const requires_login = res && (res.status === 401 || res.status === 403) ? 1 : null;
+    const gtm = await fetchGtmContainers(homeHtml ? [homeHtml] : []);
+    const agent_vendor = detectAgentVendor(home$ ? [home$] : [], gtm);
     return {
       help_centre_url: helpCentre.url,
       help_centre_url_status: "found",
       ...EMPTY_SIGNALS,
+      agent_vendor,
       requires_login,
     };
   }
@@ -49,7 +61,8 @@ export async function runTier1(domain: string): Promise<Tier1Result> {
 
   const platform = detectPlatform(pageUrl, html);
   const help_audience = await classifyAudience($, pageUrl, platform);
-  const agent_vendor = detectAgentVendor($);
+  const gtm = await fetchGtmContainers(homeHtml ? [html, homeHtml] : [html]);
+  const agent_vendor = detectAgentVendor(home$ ? [$, home$] : [$], gtm);
   const { multilingual, detected_languages } = detectMultilingual($, pageUrl);
   const requires_login = detectAuthRequired($, pageUrl);
 
@@ -95,7 +108,9 @@ function detectPlatform(url: string, html: string): string | null {
     haystack.includes(".intercom.help") ||
     haystack.includes("intercom.com/help-center") ||
     haystack.includes("intercomcdn.com") ||
-    haystack.includes("intercomassets.com")
+    haystack.includes("intercomassets.com") ||
+    haystack.includes("intercomcdn.eu") ||
+    haystack.includes("intercomassets.eu")
   ) {
     return "Intercom";
   }
@@ -214,40 +229,76 @@ async function classifyAudience(
 
 // --- Step D: agent vendor detection ----------------------------------------
 
-const AGENT_VENDOR_SIGNATURES: { name: string; test: (scripts: string[], inline: string) => boolean }[] = [
+const AGENT_VENDOR_SIGNATURES: { name: string; test: (scripts: string, inline: string) => boolean }[] = [
   {
     name: "Intercom Fin",
     test: (scripts, inline) =>
-      scripts.some((s) => s.includes("intercomcdn.com")) ||
-      inline.includes("window.intercom") ||
-      inline.includes("intercomsettings"),
+      scripts.includes("intercomcdn.com") || inline.includes("window.intercom") || inline.includes("intercomsettings"),
   },
   {
     name: "Zendesk AI",
-    test: (scripts) =>
-      scripts.some((s) => s.includes("zdassets.com") && (s.includes("messenger") || s.includes("web_widget"))),
+    test: (scripts) => scripts.includes("zdassets.com") && (scripts.includes("messenger") || scripts.includes("web_widget")),
   },
   {
     name: "Ada",
-    test: (scripts, inline) => scripts.some((s) => s.includes("ada.support")) || inline.includes("adasettings"),
+    test: (scripts, inline) => scripts.includes("ada.support") || inline.includes("adasettings"),
   },
   {
     name: "Forethought",
-    test: (scripts) => scripts.some((s) => s.includes("forethought.ai")),
+    test: (scripts) => scripts.includes("forethought.ai"),
   },
   {
     name: "Freshchat",
-    test: (scripts, inline) => scripts.some((s) => s.includes("freshchat.com")) || inline.includes("fcwidget"),
+    test: (scripts, inline) => scripts.includes("freshchat.com") || inline.includes("fcwidget"),
   },
   {
     name: "Tidio",
-    test: (scripts, inline) => scripts.some((s) => s.includes("tidiochat.com")) || inline.includes("tidiochatapi"),
+    test: (scripts, inline) => scripts.includes("tidiochat.com") || inline.includes("tidiochatapi"),
+  },
+  {
+    name: "Crisp",
+    test: (scripts, inline) => scripts.includes("crisp.chat") || inline.includes("$crisp") || inline.includes("crisp_website_id"),
+  },
+  {
+    name: "HubSpot",
+    test: (scripts, inline) =>
+      scripts.includes("hs-scripts.com") || scripts.includes("hubspot.com") || inline.includes("hubspotconversations"),
   },
 ];
 
-function detectAgentVendor($: CheerioAPI): string {
-  const scripts = scriptSources($);
-  const inline = inlineScripts($);
+/** GTM container IDs (e.g. "GTM-XXXXXXX") referenced anywhere in a page's HTML. */
+const GTM_ID_REGEX = /\bGTM-[A-Z0-9]{4,10}\b/g;
+
+/**
+ * Many chat/AI widgets are installed as tags inside a Google Tag Manager
+ * container rather than as a direct <script> on the page, so they're
+ * invisible to static HTML scanning. The container's published JS is public
+ * at googletagmanager.com/gtm.js?id=GTM-XXXX, so we fetch it (no headless
+ * browser required) and let the same signatures scan its contents too.
+ */
+async function fetchGtmContainers(htmlPages: string[]): Promise<string> {
+  const ids = new Set<string>();
+  for (const html of htmlPages) {
+    for (const match of html.matchAll(GTM_ID_REGEX)) ids.add(match[0]);
+  }
+  if (ids.size === 0) return "";
+
+  const bodies = await Promise.all(
+    [...ids].slice(0, 3).map(async (id) => {
+      const res = await fetchWithTimeout(`https://www.googletagmanager.com/gtm.js?id=${id}`);
+      return res && res.ok ? await res.text() : "";
+    }),
+  );
+  return bodies.join(" ").toLowerCase();
+}
+
+/** Checks for agent-vendor signatures across one or more fetched pages (e.g. the
+ * help centre and the company's homepage), since chat widgets are often only
+ * embedded on the main site even when the help centre itself has none. Also
+ * scans any GTM container JS referenced by those pages (see fetchGtmContainers). */
+function detectAgentVendor(pages: CheerioAPI[], gtm: string = ""): string {
+  const scripts = `${pages.flatMap((page) => scriptSources(page)).join(" ")} ${gtm}`;
+  const inline = `${pages.map((page) => inlineScripts(page)).join(" ")} ${gtm}`;
 
   const matches = AGENT_VENDOR_SIGNATURES.filter((sig) => sig.test(scripts, inline)).map((sig) => sig.name);
   return matches.length > 0 ? matches.join(", ") : "none";
