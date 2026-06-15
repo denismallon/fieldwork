@@ -112,11 +112,15 @@ function classifyFreshnessFromAge(medianDays: number): "fresh" | "stale" | "very
 // --- Step A: changelog URL discovery -----------------------------------------
 
 interface ChangelogDiscovery {
+  /** Stored as changelog_url — a human-readable page where possible. */
   url: string | null;
+  /** For method "rss": the feed URL/body actually used for date extraction. */
+  feedUrl: string | null;
+  feedText: string | null;
   method: "path" | "embed" | "rss" | null;
 }
 
-const NO_CHANGELOG: ChangelogDiscovery = { url: null, method: null };
+const NO_CHANGELOG: ChangelogDiscovery = { url: null, feedUrl: null, feedText: null, method: null };
 
 const CHANGELOG_PATHS = [
   "/changelog",
@@ -151,13 +155,30 @@ async function checkChangelogPath(url: string, probe: ProbeSignature | null): Pr
   return finalUrl;
 }
 
-async function checkFeedPath(url: string, probe: ProbeSignature | null): Promise<string | null> {
+async function checkFeedPath(url: string, probe: ProbeSignature | null): Promise<{ url: string; text: string } | null> {
   const res = await fetchWithTimeout(url);
   if (!res || !res.ok) return null;
   if (matchesProbe(res, probe)) return null;
 
   const text = await res.text();
-  if (text.includes("<rss") || text.includes("<feed")) return res.url || url;
+  if (text.includes("<rss") || text.includes("<feed")) return { url: res.url || url, text };
+
+  return null;
+}
+
+/** RSS <channel><link> or Atom <link rel="alternate">: the human-readable page a feed represents. */
+function extractFeedChannelLink(xml: string): string | null {
+  const $ = cheerio.load(xml, { xmlMode: true });
+
+  const rssLink = $("channel").children("link").first().text().trim();
+  if (/^https?:\/\//i.test(rssLink)) return rssLink;
+
+  const atomLinks = $("feed").children("link").toArray();
+  const chosen =
+    atomLinks.find((el) => $(el).attr("rel") === "alternate") ??
+    atomLinks.find((el) => $(el).attr("rel") !== "self");
+  const href = chosen ? $(chosen).attr("href") : undefined;
+  if (href && /^https?:\/\//i.test(href)) return href;
 
   return null;
 }
@@ -184,7 +205,7 @@ async function discoverChangelog(domain: string): Promise<ChangelogDiscovery> {
 
   for (const path of CHANGELOG_PATHS) {
     const found = await checkChangelogPath(`${origin}${path}`, probe);
-    if (found) return { url: found, method: "path" };
+    if (found) return { url: found, feedUrl: null, feedText: null, method: "path" };
   }
 
   const homeRes = await fetchWithTimeout(`${origin}/`);
@@ -192,13 +213,16 @@ async function discoverChangelog(domain: string): Promise<ChangelogDiscovery> {
     const html = await homeRes.text();
     const haystack = embedSources(html);
     if (CHANGELOG_TOOL_SIGNATURES.some((sig) => sig.test(haystack))) {
-      return { url: homeRes.url || `${origin}/`, method: "embed" };
+      return { url: homeRes.url || `${origin}/`, feedUrl: null, feedText: null, method: "embed" };
     }
   }
 
   for (const path of FEED_PATHS) {
     const found = await checkFeedPath(`${origin}${path}`, probe);
-    if (found) return { url: found, method: "rss" };
+    if (found) {
+      const channelLink = extractFeedChannelLink(found.text);
+      return { url: channelLink ?? found.url, feedUrl: found.url, feedText: found.text, method: "rss" };
+    }
   }
 
   return NO_CHANGELOG;
@@ -224,17 +248,19 @@ function extractFeedDates(xml: string): Date[] {
 }
 
 async function classifyReleaseVelocity(discovery: ChangelogDiscovery): Promise<VelocityResult> {
-  if (!discovery.url || !discovery.method) return UNKNOWN_VELOCITY;
-
-  const res = await fetchWithTimeout(discovery.url);
-  if (!res || !res.ok) return UNKNOWN_VELOCITY;
+  if (!discovery.method) return UNKNOWN_VELOCITY;
 
   if (discovery.method === "rss") {
-    const dates = extractFeedDates(await res.text());
+    if (!discovery.feedText) return UNKNOWN_VELOCITY;
+    const dates = extractFeedDates(discovery.feedText);
     if (dates.length === 0) return UNKNOWN_VELOCITY;
     const mostRecent = new Date(Math.max(...dates.map((d) => d.getTime())));
     return { release_velocity: classifyVelocityFromDate(mostRecent), release_velocity_source: "rss" };
   }
+
+  if (!discovery.url) return UNKNOWN_VELOCITY;
+  const res = await fetchWithTimeout(discovery.url);
+  if (!res || !res.ok) return UNKNOWN_VELOCITY;
 
   const html = await res.text();
   const text = cheerio.load(html)("body").text();
