@@ -2,116 +2,70 @@ import * as cheerio from "cheerio";
 import type { CheerioAPI } from "cheerio";
 import type { Account } from "../types";
 import { matchesProbe, pathOf, probeUnknownPath, type ProbeSignature } from "./helpCentre";
-import { discoverSitemap, type SitemapResult } from "./sitemap";
+import { discoverSitemap } from "./sitemap";
 import { fetchWithTimeout } from "./utils";
 
 export interface Tier3Result {
   changelog_url: string | null;
   release_velocity: "high" | "medium" | "low" | "unknown";
-  release_velocity_source: "dedicated_tool" | "rss" | "blog" | "unknown";
   freshness_signal: "fresh" | "stale" | "very_stale" | "unknown";
-  freshness_confidence: "high" | "medium" | "low" | "unmeasurable";
-  freshness_source: "in_content" | "sitemap_lastmod" | "http_header" | "unknown";
+  freshness_confidence: "high" | "medium" | "low";
+  tier3_rationale: string;
 }
+
+const FAILED_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
+  release_velocity: "unknown",
+  freshness_signal: "unknown",
+  freshness_confidence: "low",
+  tier3_rationale: "LLM analysis failed — review manually.",
+};
+
+const SYSTEM_PROMPT = `You are analysing content extracted from a B2B SaaS company's help centre
+and changelog to assess two signals:
+
+1. Release velocity - how frequently the company ships product changes.
+   Classify as: high (monthly or more frequent), medium (quarterly),
+   low (less than quarterly), or unknown.
+
+2. Content freshness - how recently the help centre articles were updated.
+   Classify as: fresh (within 90 days), stale (90-365 days),
+   very_stale (over 365 days), or unknown.
+
+Rules:
+- Base classifications only on evidence present in the content provided.
+- If the content is missing, empty, or too sparse to support a classification,
+  use 'unknown'. Do not infer or guess.
+- Pay attention to dates on changelog entries and article timestamps.
+  If dates are absent, note this explicitly.
+- If all changelog dates appear to be the same (bulk migration artifact),
+  treat freshness as unknown and explain this in the rationale.
+
+Return a JSON object with exactly these fields:
+{
+  "release_velocity": "high|medium|low|unknown",
+  "freshness_signal": "fresh|stale|very_stale|unknown",
+  "confidence": "high|medium|low",
+  "rationale": "2-3 sentences explaining the evidence behind each classification and any caveats."
+}`;
 
 export async function runTier3(account: Account): Promise<Tier3Result> {
   const sitemap = account.help_centre_url ? await discoverSitemap(account.help_centre_url, account.platform) : null;
-
   const discovery = await discoverChangelog(account.domain, sitemap?.urls ?? []);
-  const velocity = await classifyReleaseVelocity(discovery);
-  const freshness = await classifyFreshness(account, sitemap);
+  const changelogUrl = account.changelog_url ?? discovery.url;
+  const changelogContent = await extractChangelogContent(changelogUrl);
+  const articleSample = await extractArticleSample(
+    sitemap?.urls ? sampleUrls(sitemap.urls, account.help_centre_url ?? "", 5) : [],
+  );
+
+  const analysis = await analyzeWithHaiku(account.domain, changelogContent, articleSample);
 
   return {
-    changelog_url: discovery.url,
-    ...velocity,
-    ...freshness,
+    changelog_url: changelogUrl,
+    ...analysis,
   };
 }
 
-// --- Shared date helpers -----------------------------------------------------
-
-const MONTH_NAMES: Record<string, number> = {
-  jan: 0,
-  january: 0,
-  feb: 1,
-  february: 1,
-  mar: 2,
-  march: 2,
-  apr: 3,
-  april: 3,
-  may: 4,
-  jun: 5,
-  june: 5,
-  jul: 6,
-  july: 6,
-  aug: 7,
-  august: 7,
-  sep: 8,
-  sept: 8,
-  september: 8,
-  oct: 9,
-  october: 9,
-  nov: 10,
-  november: 10,
-  dec: 11,
-  december: 11,
-};
-
-const MONTH_NAME_PATTERN =
-  "January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept|Sep|Oct|Nov|Dec";
-
-const ISO_DATE_REGEX = /\b(\d{4})-(\d{2})-(\d{2})\b/g;
-const MONTH_DAY_YEAR_REGEX = new RegExp(`\\b(${MONTH_NAME_PATTERN})\\.?\\s+(\\d{1,2}),?\\s+(\\d{4})\\b`, "gi");
-const MONTH_YEAR_REGEX = new RegExp(`\\b(${MONTH_NAME_PATTERN})\\s+(\\d{4})\\b`, "gi");
-
-/** Extracts ISO and natural-language date-like strings (e.g. "January 2025", "Jan 15, 2025") from text. */
-function extractDates(text: string): Date[] {
-  const dates: Date[] = [];
-
-  for (const m of text.matchAll(ISO_DATE_REGEX)) {
-    const d = new Date(`${m[1]}-${m[2]}-${m[3]}T00:00:00Z`);
-    if (!Number.isNaN(d.getTime())) dates.push(d);
-  }
-  for (const m of text.matchAll(MONTH_DAY_YEAR_REGEX)) {
-    const month = MONTH_NAMES[m[1].toLowerCase()];
-    if (month === undefined) continue;
-    const d = new Date(Date.UTC(Number(m[3]), month, Number(m[2])));
-    if (!Number.isNaN(d.getTime())) dates.push(d);
-  }
-  for (const m of text.matchAll(MONTH_YEAR_REGEX)) {
-    const month = MONTH_NAMES[m[1].toLowerCase()];
-    if (month === undefined) continue;
-    const d = new Date(Date.UTC(Number(m[2]), month, 1));
-    if (!Number.isNaN(d.getTime())) dates.push(d);
-  }
-
-  return dates;
-}
-
-function daysAgo(date: Date): number {
-  return (Date.now() - date.getTime()) / (1000 * 60 * 60 * 24);
-}
-
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
-}
-
-function classifyVelocityFromDate(mostRecent: Date): "high" | "medium" | "low" {
-  const days = daysAgo(mostRecent);
-  if (days <= 30) return "high";
-  if (days <= 90) return "medium";
-  return "low";
-}
-
-function classifyFreshnessFromAge(medianDays: number): "fresh" | "stale" | "very_stale" {
-  if (medianDays < 90) return "fresh";
-  if (medianDays <= 365) return "stale";
-  return "very_stale";
-}
-
-// --- Step A: changelog URL discovery -----------------------------------------
+// --- Changelog URL discovery -------------------------------------------------
 
 interface ChangelogDiscovery {
   url: string | null;
@@ -130,7 +84,6 @@ const CHANGELOG_PATHS = [
   "/new",
 ];
 
-/** Keywords checked against sitemap URL paths, in priority order, after stripping non-alphanumeric characters. */
 const CHANGELOG_SITEMAP_KEYWORDS = ["changelog", "releasenotes", "whatsnew", "productupdates"];
 
 const CHANGELOG_TOOL_SIGNATURES = [
@@ -141,7 +94,6 @@ const CHANGELOG_TOOL_SIGNATURES = [
   /announcekit\.app/i,
 ];
 
-/** A path resolves only if it doesn't redirect back to the homepage and isn't an SPA catch-all (see helpCentre.ts). */
 async function checkChangelogPath(url: string, probe: ProbeSignature | null): Promise<string | null> {
   const res = await fetchWithTimeout(url, { method: "HEAD" });
   if (!res || !res.ok) return null;
@@ -154,18 +106,16 @@ async function checkChangelogPath(url: string, probe: ProbeSignature | null): Pr
   return finalUrl;
 }
 
-/** Strips everything but letters/digits (after URL-decoding) so "Release+Notes" and "release-notes" both match "releasenotes". */
 function normalizePath(path: string): string {
   let decoded = path;
   try {
     decoded = decodeURIComponent(path);
   } catch {
-    // leave as-is if malformed
+    // leave malformed paths as-is
   }
   return decoded.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-/** Searches help-centre sitemap URLs for changelog/release-notes-like paths, in keyword priority order. */
 function findChangelogInSitemap(urls: string[]): string | null {
   for (const keyword of CHANGELOG_SITEMAP_KEYWORDS) {
     const match = urls.find((url) => normalizePath(pathOf(url)).includes(keyword));
@@ -174,7 +124,6 @@ function findChangelogInSitemap(urls: string[]): string | null {
   return null;
 }
 
-/** Script/iframe src attributes on the homepage, used to detect embedded changelog tool widgets. */
 function embedSources(html: string): string {
   const $ = cheerio.load(html);
   const sources: string[] = [];
@@ -216,48 +165,36 @@ async function discoverChangelog(domain: string | null, helpCentreSitemapUrls: s
   return NO_CHANGELOG;
 }
 
-// --- Step B: release velocity classification ----------------------------------
+// --- Content extraction ------------------------------------------------------
 
-interface VelocityResult {
-  release_velocity: "high" | "medium" | "low" | "unknown";
-  release_velocity_source: "dedicated_tool" | "blog" | "unknown";
+const DATE_LABEL_REGEX =
+  /\b(?:last\s+updated|last\s+modified|updated|reviewed\s+on|reviewed|published)\s*:?\s*.{0,80}/gi;
+
+function cleanReadableText($: CheerioAPI): string {
+  $("script, style, noscript, template, svg, nav, header, footer, aside, form").remove();
+  return $("body").text().replace(/\s+/g, " ").trim();
 }
 
-const UNKNOWN_VELOCITY: VelocityResult = { release_velocity: "unknown", release_velocity_source: "unknown" };
-
-async function classifyReleaseVelocity(discovery: ChangelogDiscovery): Promise<VelocityResult> {
-  if (!discovery.url || !discovery.method) return UNKNOWN_VELOCITY;
-
-  const res = await fetchWithTimeout(discovery.url);
-  if (!res || !res.ok) return UNKNOWN_VELOCITY;
-
-  const html = await res.text();
-  const text = cheerio.load(html)("body").text();
-  const dates = extractDates(text);
-  if (dates.length === 0) return UNKNOWN_VELOCITY;
-
-  const mostRecent = new Date(Math.max(...dates.map((d) => d.getTime())));
-  const source = discovery.method === "embed" ? "dedicated_tool" : "blog";
-  return { release_velocity: classifyVelocityFromDate(mostRecent), release_velocity_source: source };
+function words(text: string): string[] {
+  return text.split(/\s+/).filter(Boolean);
 }
 
-// --- Step C: freshness signal --------------------------------------------------
-
-interface FreshnessResult {
-  freshness_signal: "fresh" | "stale" | "very_stale" | "unknown";
-  freshness_confidence: "high" | "medium" | "low" | "unmeasurable";
-  freshness_source: "in_content" | "sitemap_lastmod" | "http_header" | "unknown";
+function truncateWords(text: string, limit: number): string {
+  const parts = words(text);
+  if (parts.length <= limit) return text;
+  return parts.slice(0, limit).join(" ");
 }
 
-const UNMEASURABLE_FRESHNESS: FreshnessResult = {
-  freshness_signal: "unknown",
-  freshness_confidence: "unmeasurable",
-  freshness_source: "unknown",
-};
+async function extractChangelogContent(changelogUrl: string | null): Promise<string> {
+  if (!changelogUrl) return "";
 
-const FRESHNESS_LABEL_REGEX = /\b(?:last\s+updated|last\s+modified|updated|reviewed\s+on|published)\s*:?\s*(.{0,40})/gi;
+  const res = await fetchWithTimeout(changelogUrl);
+  if (!res || !res.ok) return "";
 
-/** Evenly samples up to `count` URLs across the list for a representative date spread. */
+  const $ = cheerio.load(await res.text());
+  return truncateWords(cleanReadableText($), 1_500);
+}
+
 function sampleUrls(urls: string[], exclude: string, count: number): string[] {
   const filtered = urls.filter((u) => u !== exclude);
   if (filtered.length <= count) return filtered;
@@ -268,118 +205,129 @@ function sampleUrls(urls: string[], exclude: string, count: number): string[] {
   return sample;
 }
 
-/** Reads article:modified_time, JSON-LD dateModified, or "Last updated"-style labels. */
-function extractInContentDate($: CheerioAPI): Date | null {
-  const metaContent = $('meta[property="article:modified_time"]').attr("content");
-  if (metaContent) {
-    const d = new Date(metaContent);
-    if (!Number.isNaN(d.getTime())) return d;
+function extractDateLabels(text: string): string[] {
+  return [...text.matchAll(DATE_LABEL_REGEX)]
+    .map((match) => match[0].trim())
+    .filter(Boolean)
+    .slice(0, 5);
+}
+
+async function extractArticleExcerpt(url: string): Promise<string | null> {
+  const res = await fetchWithTimeout(url);
+  if (!res || !res.ok) return null;
+
+  const $ = cheerio.load(await res.text());
+  const title = $("title").first().text().replace(/\s+/g, " ").trim();
+  const text = cleanReadableText($);
+  const dateLabels = extractDateLabels(text);
+  const body = truncateWords(text, 150);
+
+  const lines = [`URL: ${url}`];
+  if (title) lines.push(`Title: ${title}`);
+  if (dateLabels.length > 0) lines.push(`Visible date labels: ${dateLabels.join(" | ")}`);
+  if (body) lines.push(`Excerpt: ${body}`);
+
+  return lines.join("\n");
+}
+
+async function extractArticleSample(urls: string[]): Promise<string> {
+  const excerpts: string[] = [];
+  for (const url of urls.slice(0, 5)) {
+    const excerpt = await extractArticleExcerpt(url);
+    if (excerpt) excerpts.push(excerpt);
+  }
+  return truncateWords(excerpts.join("\n\n"), 1_000);
+}
+
+// --- LLM analysis ------------------------------------------------------------
+
+interface HaikuAnalysis {
+  release_velocity: "high" | "medium" | "low" | "unknown";
+  freshness_signal: "fresh" | "stale" | "very_stale" | "unknown";
+  freshness_confidence: "high" | "medium" | "low";
+  tier3_rationale: string;
+}
+
+const RELEASE_VELOCITIES = new Set(["high", "medium", "low", "unknown"]);
+const FRESHNESS_SIGNALS = new Set(["fresh", "stale", "very_stale", "unknown"]);
+const CONFIDENCE_VALUES = new Set(["high", "medium", "low"]);
+
+function buildUserPrompt(domain: string | null, changelogContent: string, articleSample: string): string {
+  return `Company domain: ${domain ?? "unknown"}
+
+CHANGELOG CONTENT:
+${changelogContent || "No changelog URL found or content could not be retrieved."}
+
+ARTICLE SAMPLE (up to 5 articles):
+${articleSample || "No articles could be retrieved."}`;
+}
+
+function parseAnalysisJson(text: string): HaikuAnalysis {
+  const parsed = JSON.parse(text) as Record<string, unknown>;
+
+  if (
+    typeof parsed.release_velocity !== "string" ||
+    !RELEASE_VELOCITIES.has(parsed.release_velocity) ||
+    typeof parsed.freshness_signal !== "string" ||
+    !FRESHNESS_SIGNALS.has(parsed.freshness_signal) ||
+    typeof parsed.confidence !== "string" ||
+    !CONFIDENCE_VALUES.has(parsed.confidence) ||
+    typeof parsed.rationale !== "string" ||
+    parsed.rationale.trim().length === 0
+  ) {
+    throw new Error("Invalid Tier 3 analysis JSON");
   }
 
-  let jsonLdDate: Date | null = null;
-  $('script[type="application/ld+json"]').each((_, el) => {
-    if (jsonLdDate) return;
-    try {
-      const data = JSON.parse($(el).text());
-      for (const item of Array.isArray(data) ? data : [data]) {
-        if (item && typeof item.dateModified === "string") {
-          const d = new Date(item.dateModified);
-          if (!Number.isNaN(d.getTime())) {
-            jsonLdDate = d;
-            break;
-          }
-        }
-      }
-    } catch {
-      // ignore malformed JSON-LD
-    }
+  return {
+    release_velocity: parsed.release_velocity as HaikuAnalysis["release_velocity"],
+    freshness_signal: parsed.freshness_signal as HaikuAnalysis["freshness_signal"],
+    freshness_confidence: parsed.confidence as HaikuAnalysis["freshness_confidence"],
+    tier3_rationale: parsed.rationale.trim(),
+  };
+}
+
+async function callHaiku(userPrompt: string): Promise<HaikuAnalysis> {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not set");
+
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({
+      model: "claude-haiku-4-5-20251001",
+      max_tokens: 400,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: "user", content: userPrompt }],
+    }),
   });
-  if (jsonLdDate) return jsonLdDate;
 
-  const bodyText = $("body").text();
-  for (const m of bodyText.matchAll(FRESHNESS_LABEL_REGEX)) {
-    const dates = extractDates(m[1]);
-    if (dates.length > 0) return dates[0];
-  }
+  if (!res.ok) throw new Error(`Anthropic request failed: ${res.status}`);
 
-  return null;
+  const data = (await res.json()) as { content?: Array<{ type: string; text?: string }> };
+  const text = data.content?.find((part) => part.type === "text")?.text;
+  if (!text) throw new Error("Anthropic response did not include text");
+
+  return parseAnalysisJson(text);
 }
 
-/** Method 1 (highest reliability): in-page "Last updated"/meta/JSON-LD dates across sampled articles. */
-async function tryInContentFreshness(urls: string[]): Promise<FreshnessResult | null> {
-  const ages: number[] = [];
+async function analyzeWithHaiku(
+  domain: string | null,
+  changelogContent: string,
+  articleSample: string,
+): Promise<Omit<Tier3Result, "changelog_url">> {
+  const userPrompt = buildUserPrompt(domain, changelogContent, articleSample);
 
-  for (const url of urls) {
-    const res = await fetchWithTimeout(url);
-    if (!res || !res.ok) continue;
-    const $ = cheerio.load(await res.text());
-    const date = extractInContentDate($);
-    if (date) ages.push(daysAgo(date));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await callHaiku(userPrompt);
+    } catch {
+      // Retry once for malformed JSON or transient API failures.
+    }
   }
 
-  if (ages.length >= 5) {
-    return { freshness_signal: classifyFreshnessFromAge(median(ages)), freshness_confidence: "high", freshness_source: "in_content" };
-  }
-  if (ages.length >= 2) {
-    return { freshness_signal: classifyFreshnessFromAge(median(ages)), freshness_confidence: "medium", freshness_source: "in_content" };
-  }
-  return null;
-}
-
-const MIGRATION_ARTIFACT_THRESHOLD = 0.85;
-
-/** Method 2 (medium reliability): sitemap <lastmod> values, guarded against bulk-import artifacts. */
-function tryLastmodFreshness(lastmods: Record<string, string>): FreshnessResult | null {
-  const values = Object.values(lastmods);
-  if (values.length === 0) return null;
-
-  const dateOnly = values.map((v) => v.slice(0, 10));
-  const counts = new Map<string, number>();
-  for (const d of dateOnly) counts.set(d, (counts.get(d) ?? 0) + 1);
-  const maxShare = Math.max(...counts.values()) / dateOnly.length;
-  if (maxShare >= MIGRATION_ARTIFACT_THRESHOLD) {
-    return { freshness_signal: "unknown", freshness_confidence: "unmeasurable", freshness_source: "sitemap_lastmod" };
-  }
-
-  const ages = values.map((v) => daysAgo(new Date(v))).filter((d) => !Number.isNaN(d));
-  if (ages.length === 0) return null;
-
-  return { freshness_signal: classifyFreshnessFromAge(median(ages)), freshness_confidence: "medium", freshness_source: "sitemap_lastmod" };
-}
-
-/** Method 3 (lowest reliability): HTTP Last-Modified headers on sampled articles. */
-async function tryHttpHeaderFreshness(urls: string[]): Promise<FreshnessResult | null> {
-  const ages: number[] = [];
-
-  for (const url of urls) {
-    const res = await fetchWithTimeout(url, { method: "HEAD" });
-    if (!res) continue;
-    const lastModified = res.headers.get("last-modified");
-    if (!lastModified) continue;
-    const d = new Date(lastModified);
-    if (!Number.isNaN(d.getTime())) ages.push(daysAgo(d));
-  }
-
-  if (ages.length === 0) return null;
-
-  return { freshness_signal: classifyFreshnessFromAge(median(ages)), freshness_confidence: "low", freshness_source: "http_header" };
-}
-
-async function classifyFreshness(account: Account, sitemap: SitemapResult | null): Promise<FreshnessResult> {
-  if (!account.help_centre_url || !sitemap) return UNMEASURABLE_FRESHNESS;
-
-  const sample = sampleUrls(sitemap.urls, account.help_centre_url, 10);
-
-  const method1 = await tryInContentFreshness(sample);
-  if (method1) return method1;
-
-  if (sitemap.status === "found") {
-    const method2 = tryLastmodFreshness(sitemap.lastmods);
-    if (method2) return method2;
-  }
-
-  const method3 = await tryHttpHeaderFreshness(sample.slice(0, 5));
-  if (method3) return method3;
-
-  return UNMEASURABLE_FRESHNESS;
+  return FAILED_ANALYSIS;
 }

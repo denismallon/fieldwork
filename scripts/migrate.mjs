@@ -42,6 +42,7 @@ const ENRICHMENT_COLUMNS = [
   ["freshness_signal", "TEXT"],
   ["freshness_confidence", "TEXT"],
   ["freshness_source", "TEXT"],
+  ["tier3_rationale", "TEXT"],
   ["pass1", "INTEGER"],
   ["score", "INTEGER"],
   ["score_confidence", "TEXT"],

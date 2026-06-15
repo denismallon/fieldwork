@@ -44,25 +44,20 @@ const DRIFT_MATRIX: Record<string, Record<string, number>> = {
   low: { fresh: 0, stale: 5, very_stale: 10 },
 };
 
-/**
- * "Unknown"/"unmeasurable" (whether explicitly recorded by Tier 3 or simply
- * not yet measured) must never be read as evidence of low velocity or
- * staleness — both collapse to the neutral midpoint, with a flag added only
- * once Tier 3 has explicitly confirmed the signal is unusable.
- */
+/** Unknown Tier 3 signals collapse to the neutral drift midpoint. */
 function computeDriftRatio(account: Account, flags: string[]): number {
   const velocity = account.release_velocity;
   const freshness = account.freshness_signal;
   const freshnessConfidence = account.freshness_confidence;
 
-  if (freshnessConfidence === "unmeasurable") {
-    flags.push("Freshness unmeasurable: likely migration artifact — verify manually");
+  if (freshnessConfidence === "low") {
+    flags.push("Low confidence Tier 3 analysis — verify manually");
   }
   if (velocity === "unknown") {
     flags.push("Release velocity unknown: no dated changelog found");
   }
 
-  if (!velocity || velocity === "unknown" || !freshnessConfidence || freshnessConfidence === "unmeasurable") {
+  if (!velocity || velocity === "unknown" || !freshnessConfidence) {
     return 20;
   }
   if (!freshness || freshness === "unknown") return 20;
@@ -70,20 +65,15 @@ function computeDriftRatio(account: Account, flags: string[]): number {
   return DRIFT_MATRIX[velocity]?.[freshness] ?? 20;
 }
 
-/**
- * Null fields (Tier 3 not yet run) are treated as the most cautious enum
- * value ('unknown' / 'unmeasurable') so an incremental partial score is
- * always reported with low confidence until Tier 3 actually runs.
- */
 function computeScoreConfidence(account: Account): "high" | "medium" | "low" {
-  const freshnessConfidence = account.freshness_confidence ?? "unmeasurable";
-  const velocity = account.release_velocity ?? "unknown";
-
-  if (freshnessConfidence === "unmeasurable") return "low";
-  if (freshnessConfidence === "low" || velocity === "unknown") return "medium";
-  // freshness_confidence is 'high'|'medium', velocity != 'unknown', and
-  // help_centre_url_status === 'found' is guaranteed by pass1 === 1.
-  return "high";
+  if (
+    account.freshness_confidence === "high" ||
+    account.freshness_confidence === "medium" ||
+    account.freshness_confidence === "low"
+  ) {
+    return account.freshness_confidence;
+  }
+  return "low";
 }
 
 export function computeScoreResult(account: Account): ScoreResult {

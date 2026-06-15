@@ -157,6 +157,42 @@ function AudienceBadge({ audience }: { audience: string | null }) {
   );
 }
 
+function ConfidenceBadge({ confidence }: { confidence: string | null }) {
+  if (!confidence) return <span className="text-gray-300">—</span>;
+
+  const styles: Record<string, string> = {
+    high: "bg-green-100 text-green-800",
+    medium: "bg-amber-100 text-amber-800",
+    low: "bg-red-100 text-red-800",
+  };
+  const labels: Record<string, string> = {
+    high: "High",
+    medium: "Medium",
+    low: "Low",
+  };
+
+  return (
+    <span
+      className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+        styles[confidence] ?? "bg-gray-100 text-gray-600"
+      }`}
+    >
+      {labels[confidence] ?? confidence}
+    </span>
+  );
+}
+
+function RationalePreview({ rationale }: { rationale: string | null }) {
+  if (!rationale) return <span className="text-gray-300">—</span>;
+
+  const preview = rationale.length > 60 ? `${rationale.slice(0, 57)}...` : rationale;
+  return (
+    <span title={rationale} className="block w-[360px] truncate">
+      {preview}
+    </span>
+  );
+}
+
 function EnrichmentCell({ account, column }: { account: Account; column: EnrichmentColumnDef }) {
   switch (column.key) {
     case "help_centre_url":
@@ -205,11 +241,14 @@ function EnrichmentCell({ account, column }: { account: Account; column: Enrichm
         </a>
       );
     case "release_velocity":
-    case "freshness_signal":
-    case "freshness_confidence": {
+    case "freshness_signal": {
       const label = column.getValue(account);
       return label !== null ? <span>{label}</span> : <span className="text-gray-300">—</span>;
     }
+    case "freshness_confidence":
+      return <ConfidenceBadge confidence={account.freshness_confidence} />;
+    case "tier3_rationale":
+      return <RationalePreview rationale={account.tier3_rationale} />;
     case "pass1":
       return <Pass1Badge pass1={account.pass1} />;
     case "score":

@@ -11,10 +11,9 @@ export const maxDuration = 300;
 const FAILED_RESULT: Tier3Result = {
   changelog_url: null,
   release_velocity: "unknown",
-  release_velocity_source: "unknown",
   freshness_signal: "unknown",
-  freshness_confidence: "unmeasurable",
-  freshness_source: "unknown",
+  freshness_confidence: "low",
+  tier3_rationale: "LLM analysis failed — review manually.",
 };
 
 export async function POST(request: Request) {
@@ -48,19 +47,17 @@ export async function POST(request: Request) {
           sql: `UPDATE accounts SET
               changelog_url = ?,
               release_velocity = ?,
-              release_velocity_source = ?,
               freshness_signal = ?,
               freshness_confidence = ?,
-              freshness_source = ?,
+              tier3_rationale = ?,
               tier3_enriched_at = ?
             WHERE id = ?`,
           args: [
             tier3Result.changelog_url,
             tier3Result.release_velocity,
-            tier3Result.release_velocity_source,
             tier3Result.freshness_signal,
             tier3Result.freshness_confidence,
-            tier3Result.freshness_source,
+            tier3Result.tier3_rationale,
             nowInSeconds(),
             account.id,
           ],
@@ -70,6 +67,7 @@ export async function POST(request: Request) {
         send({ accountId: account.id, field: "release_velocity", value: tier3Result.release_velocity });
         send({ accountId: account.id, field: "freshness_signal", value: tier3Result.freshness_signal });
         send({ accountId: account.id, field: "freshness_confidence", value: tier3Result.freshness_confidence });
+        send({ accountId: account.id, field: "tier3_rationale", value: tier3Result.tier3_rationale });
 
         const scoreResult = await recalculateScore(account.id);
         send({ accountId: account.id, field: "pass1", value: scoreResult.pass1 });

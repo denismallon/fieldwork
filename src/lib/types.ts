@@ -20,10 +20,9 @@ export interface EnrichmentFields {
   page_count_status: string | null;
   changelog_url: string | null;
   release_velocity: string | null;
-  release_velocity_source: string | null;
   freshness_signal: string | null;
   freshness_confidence: string | null;
-  freshness_source: string | null;
+  tier3_rationale: string | null;
   pass1: number | null;
   score: number | null;
   score_confidence: string | null;
@@ -81,11 +80,9 @@ export function rowToAccount(row: Row): Account {
     page_count_status: row.page_count_status === null ? null : String(row.page_count_status),
     changelog_url: row.changelog_url === null ? null : String(row.changelog_url),
     release_velocity: row.release_velocity === null ? null : String(row.release_velocity),
-    release_velocity_source:
-      row.release_velocity_source === null ? null : String(row.release_velocity_source),
     freshness_signal: row.freshness_signal === null ? null : String(row.freshness_signal),
     freshness_confidence: row.freshness_confidence === null ? null : String(row.freshness_confidence),
-    freshness_source: row.freshness_source === null ? null : String(row.freshness_source),
+    tier3_rationale: row.tier3_rationale == null ? null : String(row.tier3_rationale),
     pass1: row.pass1 === null ? null : Number(row.pass1),
     score: row.score === null ? null : Number(row.score),
     score_confidence: row.score_confidence === null ? null : String(row.score_confidence),

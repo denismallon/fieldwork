@@ -64,7 +64,6 @@ const FRESHNESS_CONFIDENCE_LABELS: Record<string, string> = {
   high: "High",
   medium: "Medium",
   low: "Low",
-  unmeasurable: "Unmeasurable",
 };
 
 function releaseVelocityLabel(account: Account): string | null {
@@ -100,7 +99,8 @@ export const ENRICHMENT_COLUMNS: EnrichmentColumnDef[] = [
   { key: "changelog_url", label: "Changelog URL", tier: 3, getValue: (a) => a.changelog_url },
   { key: "release_velocity", label: "Release velocity", tier: 3, getValue: releaseVelocityLabel },
   { key: "freshness_signal", label: "Freshness signal", tier: 3, getValue: freshnessSignalLabel },
-  { key: "freshness_confidence", label: "Freshness confidence", tier: 3, getValue: freshnessConfidenceLabel },
+  { key: "freshness_confidence", label: "Confidence", tier: 3, getValue: freshnessConfidenceLabel },
+  { key: "tier3_rationale", label: "Rationale", tier: 3, getValue: (a) => a.tier3_rationale },
   { key: "pass1", label: "Pass 1", tier: 3, getValue: pass1Label },
   { key: "score", label: "Score (partial)", tier: 3, getValue: (a) => a.score },
 ];
