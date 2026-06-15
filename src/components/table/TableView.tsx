@@ -135,7 +135,8 @@ function EnrichmentCell({ account, column }: { account: Account; column: Enrichm
       const label = column.getValue(account);
       return label !== null ? <span>{label}</span> : <span className="text-gray-300">—</span>;
     }
-    case "multilingual": {
+    case "multilingual":
+    case "requires_login": {
       const label = column.getValue(account);
       return label !== null ? <span>{label}</span> : <span className="text-gray-300">—</span>;
     }

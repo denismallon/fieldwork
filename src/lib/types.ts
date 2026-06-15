@@ -14,6 +14,7 @@ export interface EnrichmentFields {
   agent_vendor: string | null;
   multilingual: number | null;
   detected_languages: string | null;
+  requires_login: number | null;
   raw_page_count: number | null;
   primary_page_count: number | null;
   page_count_status: string | null;
@@ -63,6 +64,7 @@ export function rowToAccount(row: Row): Account {
     agent_vendor: row.agent_vendor === null ? null : String(row.agent_vendor),
     multilingual: row.multilingual === null ? null : Number(row.multilingual),
     detected_languages: row.detected_languages === null ? null : String(row.detected_languages),
+    requires_login: row.requires_login === null ? null : Number(row.requires_login),
     raw_page_count: row.raw_page_count === null ? null : Number(row.raw_page_count),
     primary_page_count: row.primary_page_count === null ? null : Number(row.primary_page_count),
     page_count_status: row.page_count_status === null ? null : String(row.page_count_status),

@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   agent_vendor TEXT, -- comma-separated if multiple, or 'none'
   multilingual INTEGER, -- 0 | 1
   detected_languages TEXT, -- JSON: ["en","fr"] after Tier 1, {"en":200,"fr":150} after Tier 2
+  requires_login INTEGER, -- 0 | 1 | NULL (unknown)
   raw_page_count INTEGER,
   primary_page_count INTEGER,
   page_count_status TEXT, -- 'found' | 'not_found'

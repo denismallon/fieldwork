@@ -19,8 +19,10 @@ function pathOf(url: string): string {
 }
 
 /**
- * A candidate resolves only if it returns 2xx and doesn't redirect back to
- * the bare root domain's homepage (the usual signal of a catch-all/404 page).
+ * A candidate resolves only if it returns 2xx, doesn't redirect back to the
+ * bare root domain's homepage (the usual signal of a catch-all/404 page), and
+ * doesn't land on a www subdomain (help centres rarely live there, and a
+ * redirect to www is usually just a bounce back to the marketing site).
  */
 async function checkCandidate(url: string, rootDomain: string): Promise<string | null> {
   const res = await fetchWithTimeout(url, { method: "HEAD" });
@@ -29,10 +31,11 @@ async function checkCandidate(url: string, rootDomain: string): Promise<string |
   const finalUrl = res.url || url;
   const finalHost = hostOf(finalUrl);
   const finalPath = pathOf(finalUrl);
-  const isRootHost = finalHost === rootDomain || finalHost === `www.${rootDomain}`;
-  const isRootPath = finalPath === "" || finalPath === "/";
 
-  if (isRootHost && isRootPath) return null;
+  if (finalHost.startsWith("www.")) return null;
+
+  const isRootPath = finalPath === "" || finalPath === "/";
+  if (finalHost === rootDomain && isRootPath) return null;
 
   return finalUrl;
 }

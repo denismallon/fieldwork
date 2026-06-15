@@ -15,6 +15,7 @@ const FAILED_SIGNALS = {
   agent_vendor: "none",
   multilingual: 0 as const,
   detected_languages: null,
+  requires_login: null,
 };
 
 export async function POST(request: Request) {
@@ -53,6 +54,7 @@ export async function POST(request: Request) {
               agent_vendor = ?,
               multilingual = ?,
               detected_languages = ?,
+              requires_login = ?,
               tier1_enriched_at = ?
             WHERE id = ?`,
           args: [
@@ -63,6 +65,7 @@ export async function POST(request: Request) {
             signals.agent_vendor,
             signals.multilingual,
             signals.detected_languages,
+            signals.requires_login,
             nowInSeconds(),
             account.id,
           ],
@@ -73,6 +76,7 @@ export async function POST(request: Request) {
         send({ accountId: account.id, field: "help_audience", value: signals.help_audience });
         send({ accountId: account.id, field: "agent_vendor", value: signals.agent_vendor });
         send({ accountId: account.id, field: "multilingual", value: signals.multilingual });
+        send({ accountId: account.id, field: "requires_login", value: signals.requires_login });
       }
 
       controller.close();

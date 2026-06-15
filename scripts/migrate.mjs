@@ -32,6 +32,7 @@ const ENRICHMENT_COLUMNS = [
   ["agent_vendor", "TEXT"],
   ["multilingual", "INTEGER"],
   ["detected_languages", "TEXT"],
+  ["requires_login", "INTEGER"],
   ["raw_page_count", "INTEGER"],
   ["primary_page_count", "INTEGER"],
   ["page_count_status", "TEXT"],

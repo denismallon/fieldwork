@@ -11,6 +11,7 @@ export interface Tier1Result {
   agent_vendor: string;
   multilingual: 0 | 1;
   detected_languages: string | null;
+  requires_login: 0 | 1 | null;
 }
 
 const EMPTY_SIGNALS = {
@@ -19,6 +20,7 @@ const EMPTY_SIGNALS = {
   agent_vendor: "none",
   multilingual: 0 as const,
   detected_languages: null,
+  requires_login: null as 0 | 1 | null,
 };
 
 export async function runTier1(domain: string): Promise<Tier1Result> {
@@ -30,7 +32,15 @@ export async function runTier1(domain: string): Promise<Tier1Result> {
 
   const res = await fetchWithTimeout(helpCentre.url);
   if (!res || !res.ok) {
-    return { help_centre_url: helpCentre.url, help_centre_url_status: "found", ...EMPTY_SIGNALS };
+    // A 401/403 on the help centre itself is a strong login-wall signal;
+    // other failures (timeouts, 5xx) don't tell us anything about auth.
+    const requires_login = res && (res.status === 401 || res.status === 403) ? 1 : null;
+    return {
+      help_centre_url: helpCentre.url,
+      help_centre_url_status: "found",
+      ...EMPTY_SIGNALS,
+      requires_login,
+    };
   }
 
   const html = await res.text();
@@ -41,6 +51,7 @@ export async function runTier1(domain: string): Promise<Tier1Result> {
   const help_audience = await classifyAudience($, pageUrl, platform);
   const agent_vendor = detectAgentVendor($);
   const { multilingual, detected_languages } = detectMultilingual($, pageUrl);
+  const requires_login = detectAuthRequired($, pageUrl);
 
   return {
     help_centre_url: helpCentre.url,
@@ -50,6 +61,7 @@ export async function runTier1(domain: string): Promise<Tier1Result> {
     agent_vendor,
     multilingual,
     detected_languages,
+    requires_login,
   };
 }
 
@@ -293,4 +305,32 @@ function detectMultilingual(
   }
 
   return { multilingual: 1, detected_languages: JSON.stringify([...codes].sort()) };
+}
+
+// --- Step F: authentication / login-wall detection --------------------------
+
+const AUTH_URL_PATTERN = /\/(login|log-in|signin|sign-in|sso|auth)(\/|$|\?|#)/i;
+
+const AUTH_PHRASES = [
+  "log in to continue",
+  "sign in to continue",
+  "log in to view",
+  "sign in to view",
+  "please log in",
+  "please sign in",
+  "you must be logged in",
+  "you need to sign in",
+  "you need to be signed in",
+  "this content is restricted",
+  "restricted to logged-in users",
+];
+
+function detectAuthRequired($: CheerioAPI, url: string): 0 | 1 {
+  if (AUTH_URL_PATTERN.test(url.toLowerCase())) return 1;
+  if ($('input[type="password"]').length > 0) return 1;
+
+  const bodyText = $("body").text().toLowerCase();
+  if (AUTH_PHRASES.some((phrase) => bodyText.includes(phrase))) return 1;
+
+  return 0;
 }

@@ -41,6 +41,11 @@ function agentVendorLabel(account: Account): string | null {
   return account.agent_vendor === "none" ? "None" : account.agent_vendor;
 }
 
+function authenticationLabel(account: Account): string | null {
+  if (account.requires_login === null) return null;
+  return account.requires_login ? "Required" : "Not required";
+}
+
 /** Enrichment columns, in display and export order. */
 export const ENRICHMENT_COLUMNS: EnrichmentColumnDef[] = [
   { key: "help_centre_url", label: "Help centre URL", tier: 1, getValue: (a) => a.help_centre_url },
@@ -48,6 +53,7 @@ export const ENRICHMENT_COLUMNS: EnrichmentColumnDef[] = [
   { key: "help_audience", label: "Help audience", tier: 1, getValue: (a) => a.help_audience },
   { key: "agent_vendor", label: "Agent vendor", tier: 1, getValue: agentVendorLabel },
   { key: "multilingual", label: "Multilingual", tier: 1, getValue: multilingualLabel },
+  { key: "requires_login", label: "Authentication", tier: 1, getValue: authenticationLabel },
   { key: "raw_page_count", label: "Raw page count", tier: 2, getValue: (a) => a.raw_page_count },
   { key: "primary_page_count", label: "Primary page count", tier: 2, getValue: (a) => a.primary_page_count },
   { key: "pass1", label: "Pass 1", tier: 3, getValue: () => null },
