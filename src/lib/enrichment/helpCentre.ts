@@ -6,7 +6,8 @@ export interface HelpCentreResult {
   status: "found" | "not_found";
 }
 
-const SUBDOMAIN_PREFIXES = ["help", "support", "docs", "kb"];
+/** Checked in order; help-site subdomains aimed at non-technical end users rank ahead of developer-facing docs. */
+const SUBDOMAIN_PREFIXES = ["help", "support", "knowledge", "docs", "kb"];
 const PATH_CANDIDATES = ["/hc", "/help", "/support", "/docs", "/knowledge-base"];
 const NAV_KEYWORDS = ["help", "support", "docs", "knowledge", "hc"];
 
