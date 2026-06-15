@@ -20,6 +20,13 @@ const FAILED_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
   tier3_rationale: "LLM analysis failed — review manually.",
 };
 
+const NO_CHANGELOG_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
+  release_velocity: "unknown",
+  freshness_signal: "unknown",
+  freshness_confidence: "low",
+  tier3_rationale: "No changelog found — release velocity and freshness were not assessed.",
+};
+
 const SYSTEM_PROMPT = `You are analysing content extracted from a B2B SaaS company's help centre
 and changelog to assess two signals:
 
@@ -27,9 +34,11 @@ and changelog to assess two signals:
    Classify as: high (monthly or more frequent), medium (quarterly),
    low (less than quarterly), or unknown.
 
-2. Content freshness - how recently the help centre articles were updated.
-   Classify as: fresh (within 90 days), stale (90-365 days),
-   very_stale (over 365 days), or unknown.
+2. Content freshness - how recently the help centre articles were updated,
+   measured against the "Today's date" given in the user message.
+   Classify as: fresh (dated within the 90 days before today), stale
+   (90-365 days before today), very_stale (over 365 days before today),
+   or unknown.
 
 Rules:
 - Base classifications only on evidence present in the content provided.
@@ -37,6 +46,9 @@ Rules:
   use 'unknown'. Do not infer or guess.
 - Pay attention to dates on changelog entries and article timestamps.
   If dates are absent, note this explicitly.
+- Always compute freshness relative to the "Today's date" given in the user
+  message, not relative to your training data. Show your date arithmetic
+  (e.g. "today - article date = N days") in your reasoning before classifying.
 - If all changelog dates appear to be the same (bulk migration artifact),
   treat freshness as unknown and explain this in the rationale.
 
@@ -52,6 +64,11 @@ export async function runTier3(account: Account): Promise<Tier3Result> {
   const sitemap = account.help_centre_url ? await discoverSitemap(account.help_centre_url, account.platform) : null;
   const discovery = await discoverChangelog(account.domain, sitemap?.urls ?? []);
   const changelogUrl = account.changelog_url ?? discovery.url;
+
+  if (!changelogUrl) {
+    return { changelog_url: null, ...NO_CHANGELOG_ANALYSIS };
+  }
+
   const changelogContent = await extractChangelogContent(changelogUrl);
   const articleSample = await extractArticleSample(
     sitemap?.urls ? sampleUrls(sitemap.urls, account.help_centre_url ?? "", 5) : [],
@@ -253,7 +270,9 @@ const FRESHNESS_SIGNALS = new Set(["fresh", "stale", "very_stale", "unknown"]);
 const CONFIDENCE_VALUES = new Set(["high", "medium", "low"]);
 
 function buildUserPrompt(domain: string | null, changelogContent: string, articleSample: string): string {
-  return `Company domain: ${domain ?? "unknown"}
+  const today = new Date().toISOString().slice(0, 10);
+  return `Today's date: ${today}
+Company domain: ${domain ?? "unknown"}
 
 CHANGELOG CONTENT:
 ${changelogContent || "No changelog URL found or content could not be retrieved."}
