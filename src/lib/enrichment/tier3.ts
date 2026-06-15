@@ -31,27 +31,44 @@ const NO_CHANGELOG_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
 const SYSTEM_PROMPT = `You are analysing content extracted from a B2B SaaS company's help centre
 and changelog to assess two signals:
 
-1. Release velocity - how frequently the company ships product changes.
-   Classify as: high (monthly or more frequent), medium (quarterly),
-   low (less than quarterly), or unknown.
+1. Release velocity - how frequently the company ships product changes,
+   based on the gaps between consecutive dated changelog/release entries.
+   Classify as: high (entries average 6 weeks or less apart), medium
+   (entries average 6 weeks to 4 months apart), low (entries average more
+   than 4 months apart), or unknown.
 
-2. Content freshness - how recently the help centre articles were updated,
-   measured against the "Today's date" given in the user message.
-   Classify as: fresh (dated within the 90 days before today), stale
-   (90-365 days before today), very_stale (over 365 days before today),
-   or unknown.
+2. Content freshness - how recently the most relevant documentation was
+   updated, measured against the "Today's date" given in the user message.
+   Classify as: fresh (most recently dated entry is within 90 days before
+   today), stale (90-365 days before today), very_stale (over 365 days
+   before today), or unknown.
 
 Rules:
 - Base classifications only on evidence present in the content provided.
-- If the content is missing, empty, or too sparse to support a classification,
-  use 'unknown'. Do not infer or guess.
-- Pay attention to dates on changelog entries and article timestamps.
-  If dates are absent, note this explicitly.
-- Always compute freshness relative to the "Today's date" given in the user
-  message, not relative to your training data. Show your date arithmetic
-  (e.g. "today - article date = N days") in your reasoning before classifying.
+  Do not infer, guess, or use general knowledge about the company.
+- Before using any retrieved page as evidence, check whether it actually
+  describes product changes, features, fixes, or documentation updates.
+  Marketing copy, press releases, blog posts, or announcements about the
+  business (funding, partnerships, awards, hiring) do NOT count as evidence
+  for either signal, even if dated - treat such content as absent.
+- Release velocity must be based on at least 2 qualifying dated entries
+  from within the 12 months before "Today's date". State the gap between
+  each consecutive pair of entries (in weeks/months), then classify on the
+  AVERAGE gap using the bands above. Entries older than 12 months may be
+  noted for context but must not drive the classification. If fewer than 2
+  qualifying entries fall within the last 12 months, release_velocity =
+  "unknown".
+- Content freshness must be based on the single most recently dated
+  qualifying entry across the changelog and article sample combined
+  (whichever is newer). Show "today - that date = N days" and map it
+  directly to the bands above - do not override this mapping with
+  narrative reasoning (e.g. "other evidence suggests ongoing activity").
+  If no qualifying dated entry exists anywhere, freshness_signal =
+  "unknown".
 - If all changelog dates appear to be the same (bulk migration artifact),
   treat freshness as unknown and explain this in the rationale.
+- When in doubt between a specific classification and "unknown", choose
+  "unknown".
 
 Return a JSON object with exactly these fields:
 {
