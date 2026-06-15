@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import type { CheerioAPI } from "cheerio";
 import type { Account } from "../types";
 import { matchesProbe, pathOf, probeUnknownPath, type ProbeSignature } from "./helpCentre";
-import { discoverSitemap } from "./sitemap";
+import { discoverSitemap, type SitemapResult } from "./sitemap";
 import { fetchWithTimeout } from "./utils";
 
 export interface Tier3Result {
@@ -15,9 +15,11 @@ export interface Tier3Result {
 }
 
 export async function runTier3(account: Account): Promise<Tier3Result> {
-  const discovery = account.domain ? await discoverChangelog(account.domain) : NO_CHANGELOG;
+  const sitemap = account.help_centre_url ? await discoverSitemap(account.help_centre_url, account.platform) : null;
+
+  const discovery = await discoverChangelog(account.domain, sitemap?.urls ?? []);
   const velocity = await classifyReleaseVelocity(discovery);
-  const freshness = await classifyFreshness(account);
+  const freshness = await classifyFreshness(account, sitemap);
 
   return {
     changelog_url: discovery.url,
@@ -112,15 +114,11 @@ function classifyFreshnessFromAge(medianDays: number): "fresh" | "stale" | "very
 // --- Step A: changelog URL discovery -----------------------------------------
 
 interface ChangelogDiscovery {
-  /** Stored as changelog_url — a human-readable page where possible. */
   url: string | null;
-  /** For method "rss": the feed URL/body actually used for date extraction. */
-  feedUrl: string | null;
-  feedText: string | null;
-  method: "path" | "embed" | "rss" | null;
+  method: "sitemap" | "path" | "embed" | null;
 }
 
-const NO_CHANGELOG: ChangelogDiscovery = { url: null, feedUrl: null, feedText: null, method: null };
+const NO_CHANGELOG: ChangelogDiscovery = { url: null, method: null };
 
 const CHANGELOG_PATHS = [
   "/changelog",
@@ -132,7 +130,8 @@ const CHANGELOG_PATHS = [
   "/new",
 ];
 
-const FEED_PATHS = ["/feed", "/rss", "/atom", "/feed.xml", "/changelog.xml", "/releases.rss"];
+/** Keywords checked against sitemap URL paths, in priority order, after stripping non-alphanumeric characters. */
+const CHANGELOG_SITEMAP_KEYWORDS = ["changelog", "releasenotes", "whatsnew", "productupdates"];
 
 const CHANGELOG_TOOL_SIGNATURES = [
   /beamer\.io/i,
@@ -155,31 +154,23 @@ async function checkChangelogPath(url: string, probe: ProbeSignature | null): Pr
   return finalUrl;
 }
 
-async function checkFeedPath(url: string, probe: ProbeSignature | null): Promise<{ url: string; text: string } | null> {
-  const res = await fetchWithTimeout(url);
-  if (!res || !res.ok) return null;
-  if (matchesProbe(res, probe)) return null;
-
-  const text = await res.text();
-  if (text.includes("<rss") || text.includes("<feed")) return { url: res.url || url, text };
-
-  return null;
+/** Strips everything but letters/digits (after URL-decoding) so "Release+Notes" and "release-notes" both match "releasenotes". */
+function normalizePath(path: string): string {
+  let decoded = path;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    // leave as-is if malformed
+  }
+  return decoded.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-/** RSS <channel><link> or Atom <link rel="alternate">: the human-readable page a feed represents. */
-function extractFeedChannelLink(xml: string): string | null {
-  const $ = cheerio.load(xml, { xmlMode: true });
-
-  const rssLink = $("channel").children("link").first().text().trim();
-  if (/^https?:\/\//i.test(rssLink)) return rssLink;
-
-  const atomLinks = $("feed").children("link").toArray();
-  const chosen =
-    atomLinks.find((el) => $(el).attr("rel") === "alternate") ??
-    atomLinks.find((el) => $(el).attr("rel") !== "self");
-  const href = chosen ? $(chosen).attr("href") : undefined;
-  if (href && /^https?:\/\//i.test(href)) return href;
-
+/** Searches help-centre sitemap URLs for changelog/release-notes-like paths, in keyword priority order. */
+function findChangelogInSitemap(urls: string[]): string | null {
+  for (const keyword of CHANGELOG_SITEMAP_KEYWORDS) {
+    const match = urls.find((url) => normalizePath(pathOf(url)).includes(keyword));
+    if (match) return match;
+  }
   return null;
 }
 
@@ -198,14 +189,19 @@ function embedSources(html: string): string {
   return sources.join(" ").toLowerCase();
 }
 
-async function discoverChangelog(domain: string): Promise<ChangelogDiscovery> {
+async function discoverChangelog(domain: string | null, helpCentreSitemapUrls: string[]): Promise<ChangelogDiscovery> {
+  const sitemapMatch = findChangelogInSitemap(helpCentreSitemapUrls);
+  if (sitemapMatch) return { url: sitemapMatch, method: "sitemap" };
+
+  if (!domain) return NO_CHANGELOG;
+
   const rootDomain = domain.replace(/^www\./i, "").toLowerCase();
   const origin = `https://${rootDomain}`;
   const probe = await probeUnknownPath(rootDomain);
 
   for (const path of CHANGELOG_PATHS) {
     const found = await checkChangelogPath(`${origin}${path}`, probe);
-    if (found) return { url: found, feedUrl: null, feedText: null, method: "path" };
+    if (found) return { url: found, method: "path" };
   }
 
   const homeRes = await fetchWithTimeout(`${origin}/`);
@@ -213,15 +209,7 @@ async function discoverChangelog(domain: string): Promise<ChangelogDiscovery> {
     const html = await homeRes.text();
     const haystack = embedSources(html);
     if (CHANGELOG_TOOL_SIGNATURES.some((sig) => sig.test(haystack))) {
-      return { url: homeRes.url || `${origin}/`, feedUrl: null, feedText: null, method: "embed" };
-    }
-  }
-
-  for (const path of FEED_PATHS) {
-    const found = await checkFeedPath(`${origin}${path}`, probe);
-    if (found) {
-      const channelLink = extractFeedChannelLink(found.text);
-      return { url: channelLink ?? found.url, feedUrl: found.url, feedText: found.text, method: "rss" };
+      return { url: homeRes.url || `${origin}/`, method: "embed" };
     }
   }
 
@@ -232,33 +220,14 @@ async function discoverChangelog(domain: string): Promise<ChangelogDiscovery> {
 
 interface VelocityResult {
   release_velocity: "high" | "medium" | "low" | "unknown";
-  release_velocity_source: "dedicated_tool" | "rss" | "blog" | "unknown";
+  release_velocity_source: "dedicated_tool" | "blog" | "unknown";
 }
 
 const UNKNOWN_VELOCITY: VelocityResult = { release_velocity: "unknown", release_velocity_source: "unknown" };
 
-function extractFeedDates(xml: string): Date[] {
-  const $ = cheerio.load(xml, { xmlMode: true });
-  const dates: Date[] = [];
-  $("pubDate, published, updated").each((_, el) => {
-    const d = new Date($(el).text().trim());
-    if (!Number.isNaN(d.getTime())) dates.push(d);
-  });
-  return dates;
-}
-
 async function classifyReleaseVelocity(discovery: ChangelogDiscovery): Promise<VelocityResult> {
-  if (!discovery.method) return UNKNOWN_VELOCITY;
+  if (!discovery.url || !discovery.method) return UNKNOWN_VELOCITY;
 
-  if (discovery.method === "rss") {
-    if (!discovery.feedText) return UNKNOWN_VELOCITY;
-    const dates = extractFeedDates(discovery.feedText);
-    if (dates.length === 0) return UNKNOWN_VELOCITY;
-    const mostRecent = new Date(Math.max(...dates.map((d) => d.getTime())));
-    return { release_velocity: classifyVelocityFromDate(mostRecent), release_velocity_source: "rss" };
-  }
-
-  if (!discovery.url) return UNKNOWN_VELOCITY;
   const res = await fetchWithTimeout(discovery.url);
   if (!res || !res.ok) return UNKNOWN_VELOCITY;
 
@@ -396,10 +365,9 @@ async function tryHttpHeaderFreshness(urls: string[]): Promise<FreshnessResult |
   return { freshness_signal: classifyFreshnessFromAge(median(ages)), freshness_confidence: "low", freshness_source: "http_header" };
 }
 
-async function classifyFreshness(account: Account): Promise<FreshnessResult> {
-  if (!account.help_centre_url) return UNMEASURABLE_FRESHNESS;
+async function classifyFreshness(account: Account, sitemap: SitemapResult | null): Promise<FreshnessResult> {
+  if (!account.help_centre_url || !sitemap) return UNMEASURABLE_FRESHNESS;
 
-  const sitemap = await discoverSitemap(account.help_centre_url, account.platform);
   const sample = sampleUrls(sitemap.urls, account.help_centre_url, 10);
 
   const method1 = await tryInContentFreshness(sample);

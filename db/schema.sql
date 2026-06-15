@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   page_count_status TEXT, -- 'found' | 'not_found'
   changelog_url TEXT,
   release_velocity TEXT, -- 'high' | 'medium' | 'low' | 'unknown'
-  release_velocity_source TEXT, -- 'dedicated_tool' | 'rss' | 'blog' | 'unknown'
+  release_velocity_source TEXT, -- 'dedicated_tool' | 'blog' | 'unknown'
   freshness_signal TEXT, -- 'fresh' | 'stale' | 'very_stale' | 'unknown'
   freshness_confidence TEXT, -- 'high' | 'medium' | 'low' | 'unmeasurable'
   freshness_source TEXT, -- 'in_content' | 'sitemap_lastmod' | 'http_header' | 'unknown'
