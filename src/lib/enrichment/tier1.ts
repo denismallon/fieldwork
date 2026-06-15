@@ -37,7 +37,7 @@ export async function runTier1(domain: string): Promise<Tier1Result> {
   const pageUrl = res.url || helpCentre.url;
   const $ = cheerio.load(html);
 
-  const platform = detectPlatform($, pageUrl);
+  const platform = detectPlatform(pageUrl, html);
   const help_audience = await classifyAudience($, pageUrl, platform);
   const agent_vendor = detectAgentVendor($);
   const { multilingual, detected_languages } = detectMultilingual($, pageUrl);
@@ -72,37 +72,34 @@ function inlineScripts($: CheerioAPI): string {
   return combined.toLowerCase();
 }
 
-function detectPlatform($: CheerioAPI, url: string): string | null {
+function detectPlatform(url: string, html: string): string | null {
   const lowerUrl = url.toLowerCase();
-  const scripts = scriptSources($);
+  const haystack = `${lowerUrl} ${html.toLowerCase()}`;
 
-  if (
-    lowerUrl.includes(".zendesk.com") ||
-    /\/hc\//.test(lowerUrl) ||
-    scripts.some((s) => s.includes("zdassets.com"))
-  ) {
+  if (haystack.includes(".zendesk.com") || haystack.includes("zdassets.com") || /\/hc\//.test(lowerUrl)) {
     return "Zendesk";
   }
   if (
-    lowerUrl.includes(".intercom.help") ||
-    lowerUrl.includes("intercom.com/help-center") ||
-    scripts.some((s) => s.includes("intercomcdn.com") || s.includes("js.intercomcdn.com"))
+    haystack.includes(".intercom.help") ||
+    haystack.includes("intercom.com/help-center") ||
+    haystack.includes("intercomcdn.com") ||
+    haystack.includes("intercomassets.com")
   ) {
     return "Intercom";
   }
-  if (lowerUrl.includes(".freshdesk.com") || lowerUrl.includes("freshworks.com/help")) {
+  if (haystack.includes(".freshdesk.com") || haystack.includes("freshworks.com/help")) {
     return "Freshdesk";
   }
-  if (lowerUrl.includes(".helpscoutdocs.com") || lowerUrl.includes("helpscoutapp.com")) {
+  if (haystack.includes(".helpscoutdocs.com") || haystack.includes("helpscoutapp.com")) {
     return "HelpScout";
   }
-  if (lowerUrl.includes(".document360.com") || lowerUrl.includes("document360.io")) {
+  if (haystack.includes(".document360.com") || haystack.includes("document360.io")) {
     return "Document360";
   }
-  if (lowerUrl.includes(".gitbook.io") || lowerUrl.includes("gitbook.com")) {
+  if (haystack.includes(".gitbook.io") || haystack.includes("gitbook.com")) {
     return "GitBook";
   }
-  if (lowerUrl.includes(".notion.site")) {
+  if (haystack.includes(".notion.site")) {
     return "Notion";
   }
   return null;
