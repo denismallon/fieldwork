@@ -96,18 +96,32 @@ function detectPlatform(url: string, html: string): string | null {
   if (haystack.includes(".document360.com") || haystack.includes("document360.io")) {
     return "Document360";
   }
+  if (haystack.includes("helpjuice.com")) {
+    return "Helpjuice";
+  }
   if (haystack.includes(".gitbook.io") || haystack.includes("gitbook.com")) {
     return "GitBook";
   }
   if (haystack.includes(".notion.site")) {
     return "Notion";
   }
+  if (haystack.includes(".atlassian.net") || haystack.includes("/servicedesk/")) {
+    return "Jira Service Management";
+  }
   return null;
 }
 
 // --- Step C: help audience classification ---------------------------------
 
-const NON_TECHNICAL_PLATFORMS = new Set(["Zendesk", "Intercom", "Freshdesk", "HelpScout", "Document360"]);
+const NON_TECHNICAL_PLATFORMS = new Set([
+  "Zendesk",
+  "Intercom",
+  "Freshdesk",
+  "HelpScout",
+  "Document360",
+  "Helpjuice",
+  "Jira Service Management",
+]);
 const TECHNICAL_SUBDOMAIN_PREFIXES = new Set(["docs", "api", "developers"]);
 const NON_TECHNICAL_SUBDOMAIN_PREFIXES = new Set(["help", "support"]);
 const TECHNICAL_TERMS = ["api", "endpoint", "webhook", "authentication", "sdk", "curl", "json", "oauth"];
