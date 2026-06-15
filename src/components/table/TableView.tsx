@@ -654,7 +654,7 @@ export default function TableView({
         <table className="w-full whitespace-nowrap text-sm">
           <thead>
             <tr>
-              <th className="px-3 py-2 text-left">
+              <th className="sticky left-0 z-20 w-10 bg-white px-3 py-2 text-left">
                 <input
                   type="checkbox"
                   checked={allSelected}
@@ -666,7 +666,9 @@ export default function TableView({
                 <th
                   key={column.key}
                   onClick={() => handleSort(column.key)}
-                  className="cursor-pointer select-none px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500 hover:text-gray-700"
+                  className={`cursor-pointer select-none px-3 py-2 text-left text-xs font-medium uppercase tracking-wide text-gray-500 hover:text-gray-700 ${
+                    column.key === "company_name" ? "sticky left-10 z-20 border-r border-gray-200 bg-white" : ""
+                  }`}
                 >
                   {column.label}
                   {sortColumn === column.key && (sortDirection === "asc" ? " ▲" : " ▼")}
@@ -730,7 +732,11 @@ export default function TableView({
                 key={account.id}
                 className={selectedIds.has(account.id) ? "bg-gray-50" : undefined}
               >
-                <td className="px-3 py-2">
+                <td
+                  className={`sticky left-0 z-10 w-10 px-3 py-2 ${
+                    selectedIds.has(account.id) ? "bg-gray-50" : "bg-white"
+                  }`}
+                >
                   <input
                     type="checkbox"
                     checked={selectedIds.has(account.id)}
@@ -739,7 +745,16 @@ export default function TableView({
                   />
                 </td>
                 {FIXED_COLUMNS.map((column) => (
-                  <td key={column.key} className="px-3 py-2 text-gray-700">
+                  <td
+                    key={column.key}
+                    className={`px-3 py-2 text-gray-700 ${
+                      column.key === "company_name"
+                        ? `sticky left-10 z-10 border-r border-gray-200 ${
+                            selectedIds.has(account.id) ? "bg-gray-50" : "bg-white"
+                          }`
+                        : ""
+                    }`}
+                  >
                     {column.getValue(account) ?? ""}
                   </td>
                 ))}
