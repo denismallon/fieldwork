@@ -3,14 +3,14 @@ import type { CheerioAPI } from "cheerio";
 import type { Account } from "../types";
 import { matchesProbe, pathOf, probeUnknownPath, type ProbeSignature } from "./helpCentre";
 import { discoverSitemap } from "./sitemap";
-import { fetchWithTimeout } from "./utils";
+import { fetchWithTimeout, hostOf } from "./utils";
 
 export interface Tier3Result {
   changelog_url: string | null;
-  release_velocity: "high" | "medium" | "low" | "unknown";
-  freshness_signal: "fresh" | "stale" | "very_stale" | "unknown";
-  freshness_confidence: "high" | "medium" | "low";
-  tier3_rationale: string;
+  release_velocity: "high" | "medium" | "low" | "unknown" | null;
+  freshness_signal: "fresh" | "stale" | "very_stale" | "unknown" | null;
+  freshness_confidence: "high" | "medium" | "low" | null;
+  tier3_rationale: string | null;
 }
 
 const FAILED_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
@@ -20,11 +20,12 @@ const FAILED_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
   tier3_rationale: "LLM analysis failed — review manually.",
 };
 
+/** No changelog was found, so velocity/freshness were never assessed — leave blank rather than "unknown". */
 const NO_CHANGELOG_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
-  release_velocity: "unknown",
-  freshness_signal: "unknown",
-  freshness_confidence: "low",
-  tier3_rationale: "No changelog found — release velocity and freshness were not assessed.",
+  release_velocity: null,
+  freshness_signal: null,
+  freshness_confidence: null,
+  tier3_rationale: null,
 };
 
 const SYSTEM_PROMPT = `You are analysing content extracted from a B2B SaaS company's help centre
@@ -63,7 +64,7 @@ Return a JSON object with exactly these fields:
 export async function runTier3(account: Account): Promise<Tier3Result> {
   const sitemap = account.help_centre_url ? await discoverSitemap(account.help_centre_url, account.platform) : null;
   const discovery = await discoverChangelog(account.domain, sitemap?.urls ?? []);
-  const changelogUrl = account.changelog_url ?? discovery.url;
+  const changelogUrl = discovery.url;
 
   if (!changelogUrl) {
     return { changelog_url: null, ...NO_CHANGELOG_ANALYSIS };
@@ -123,6 +124,31 @@ async function checkChangelogPath(url: string, probe: ProbeSignature | null): Pr
   return finalUrl;
 }
 
+/**
+ * Checks each CHANGELOG_PATHS candidate and returns the first one that isn't a
+ * generic redirect target. Some marketing sites bounce every unrecognized path
+ * (e.g. /changelog, /releases, /new) to the same off-domain login/app page —
+ * if 2+ distinct candidate paths land on the same other-host URL, that's a
+ * login wall, not a path-specific changelog. Same-host duplicates (e.g. a
+ * /release-notes alias that 301s to the canonical /changelog) are left alone.
+ */
+async function findChangelogPath(rootDomain: string, probe: ProbeSignature | null): Promise<string | null> {
+  const origin = `https://${rootDomain}`;
+  const results: (string | null)[] = [];
+  for (const path of CHANGELOG_PATHS) {
+    results.push(await checkChangelogPath(`${origin}${path}`, probe));
+  }
+
+  const crossHostCounts = new Map<string, number>();
+  for (const url of results) {
+    if (url && hostOf(url) !== rootDomain) {
+      crossHostCounts.set(url, (crossHostCounts.get(url) ?? 0) + 1);
+    }
+  }
+
+  return results.find((url) => url && (crossHostCounts.get(url) ?? 0) <= 1) ?? null;
+}
+
 function normalizePath(path: string): string {
   let decoded = path;
   try {
@@ -165,10 +191,8 @@ async function discoverChangelog(domain: string | null, helpCentreSitemapUrls: s
   const origin = `https://${rootDomain}`;
   const probe = await probeUnknownPath(rootDomain);
 
-  for (const path of CHANGELOG_PATHS) {
-    const found = await checkChangelogPath(`${origin}${path}`, probe);
-    if (found) return { url: found, method: "path" };
-  }
+  const pathMatch = await findChangelogPath(rootDomain, probe);
+  if (pathMatch) return { url: pathMatch, method: "path" };
 
   const homeRes = await fetchWithTimeout(`${origin}/`);
   if (homeRes && homeRes.ok) {

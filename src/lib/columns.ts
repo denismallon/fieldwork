@@ -104,3 +104,31 @@ export const ENRICHMENT_COLUMNS: EnrichmentColumnDef[] = [
   { key: "pass1", label: "Pass 1", tier: 3, getValue: pass1Label },
   { key: "score", label: "Score (partial)", tier: 3, getValue: (a) => a.score },
 ];
+
+/**
+ * DB columns to null out (plus the relevant tierN_enriched_at) when an earlier
+ * tier is re-run, since they were derived from that tier's output. Tier 3 has
+ * nothing downstream.
+ */
+export const TIER_DOWNSTREAM_FIELDS: Record<1 | 2, string[]> = {
+  1: [
+    "raw_page_count",
+    "primary_page_count",
+    "page_count_status",
+    "tier2_enriched_at",
+    "changelog_url",
+    "release_velocity",
+    "freshness_signal",
+    "freshness_confidence",
+    "tier3_rationale",
+    "tier3_enriched_at",
+  ],
+  2: ["changelog_url", "release_velocity", "freshness_signal", "freshness_confidence", "tier3_rationale", "tier3_enriched_at"],
+};
+
+/** Labels of the real (non-derived) fields a tier generates, for confirmation dialogs. */
+export function tierOutputLabels(tier: 1 | 2 | 3): string[] {
+  return ENRICHMENT_COLUMNS.filter((c) => c.tier === tier && c.key !== "pass1" && c.key !== "score").map(
+    (c) => c.label,
+  );
+}

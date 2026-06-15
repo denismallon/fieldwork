@@ -53,7 +53,7 @@ function computeDriftRatio(account: Account, flags: string[]): number {
   if (freshnessConfidence === "low") {
     flags.push("Low confidence Tier 3 analysis — verify manually");
   }
-  if (velocity === "unknown") {
+  if (velocity === "unknown" || velocity === null) {
     flags.push("Release velocity unknown: no dated changelog found");
   }
 

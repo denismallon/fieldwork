@@ -16,13 +16,17 @@ const FAILED_RESULT = {
 };
 
 export async function POST(request: Request) {
-  const { tableId } = (await request.json()) as { tableId: string };
+  const { tableId, accountIds } = (await request.json()) as { tableId: string; accountIds?: string[] };
 
   const dbResult = await db.execute({
     sql: "SELECT * FROM accounts WHERE table_id = ? ORDER BY created_at ASC",
     args: [tableId],
   });
-  const accounts = dbResult.rows.map(rowToAccount).filter((a) => a.help_centre_url_status === "found");
+  let accounts = dbResult.rows.map(rowToAccount).filter((a) => a.help_centre_url_status === "found");
+  if (accountIds) {
+    const idSet = new Set(accountIds);
+    accounts = accounts.filter((a) => idSet.has(a.id));
+  }
 
   const stream = new ReadableStream({
     async start(controller) {

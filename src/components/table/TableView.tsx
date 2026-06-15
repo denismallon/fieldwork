@@ -3,15 +3,33 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { FIXED_COLUMNS, ENRICHMENT_COLUMNS, type EnrichmentColumnDef } from "@/lib/columns";
+import { FIXED_COLUMNS, ENRICHMENT_COLUMNS, TIER_DOWNSTREAM_FIELDS, tierOutputLabels, type EnrichmentColumnDef } from "@/lib/columns";
 import { csvRow } from "@/lib/csv";
 import type { Account } from "@/lib/types";
-import { renameTable, deleteAccounts } from "@/app/(app)/tables/[id]/actions";
+import { renameTable, deleteAccounts, wipeDownstreamFields } from "@/app/(app)/tables/[id]/actions";
 
 type SortDirection = "asc" | "desc";
 
 /** Tier 3 columns flaky enough to need an individual run icon (pass1/score are pure derived columns). */
 const TIER3_RUN_ICON_KEYS = new Set(["changelog_url", "release_velocity", "freshness_signal", "freshness_confidence"]);
+
+/** Rows a tier can actually be run for, regardless of selection. */
+function isEligibleForTier(account: Account, tier: 1 | 2 | 3): boolean {
+  if (tier === 2) return account.help_centre_url_status === "found";
+  return account.domain !== null;
+}
+
+function tierEnrichedAt(account: Account, tier: 1 | 2 | 3): number | null {
+  if (tier === 1) return account.tier1_enriched_at;
+  if (tier === 2) return account.tier2_enriched_at;
+  return account.tier3_enriched_at;
+}
+
+interface ConfirmRun {
+  tier: 1 | 2 | 3;
+  targetIds: string[];
+  selectionBased: boolean;
+}
 
 interface TableViewProps {
   table: { id: string; name: string };
@@ -284,6 +302,7 @@ export default function TableView({
   const [pendingTier1, setPendingTier1] = useState<Set<string>>(new Set());
   const [pendingTier2, setPendingTier2] = useState<Set<string>>(new Set());
   const [pendingTier3, setPendingTier3] = useState<Set<string>>(new Set());
+  const [confirmRun, setConfirmRun] = useState<ConfirmRun | null>(null);
 
   useEffect(() => {
     if (importedCount !== null) {
@@ -318,6 +337,7 @@ export default function TableView({
 
   function toggleRow(id: string) {
     setConfirmingDelete(false);
+    setConfirmRun(null);
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
@@ -328,6 +348,7 @@ export default function TableView({
 
   function toggleAll() {
     setConfirmingDelete(false);
+    setConfirmRun(null);
     setSelectedIds((prev) =>
       prev.size === accounts.length ? new Set() : new Set(accounts.map((a) => a.id)),
     );
@@ -389,16 +410,16 @@ export default function TableView({
     });
   }
 
-  async function runTier1() {
+  async function runTier1(targetIds: string[]) {
     if (tier1Running || tier2Running || tier3Running) return;
     setTier1Running(true);
-    setPendingTier1(new Set(accounts.filter((a) => a.domain).map((a) => a.id)));
+    setPendingTier1(new Set(targetIds));
 
     try {
       const res = await fetch("/api/enrich/tier1", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tableId: table.id }),
+        body: JSON.stringify({ tableId: table.id, accountIds: targetIds }),
       });
       if (!res.ok || !res.body) throw new Error("Tier 1 enrichment request failed");
 
@@ -411,16 +432,16 @@ export default function TableView({
     }
   }
 
-  async function runTier2() {
+  async function runTier2(targetIds: string[]) {
     if (tier1Running || tier2Running || tier3Running) return;
     setTier2Running(true);
-    setPendingTier2(new Set(accounts.filter((a) => a.help_centre_url_status === "found").map((a) => a.id)));
+    setPendingTier2(new Set(targetIds));
 
     try {
       const res = await fetch("/api/enrich/tier2", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tableId: table.id }),
+        body: JSON.stringify({ tableId: table.id, accountIds: targetIds }),
       });
       if (!res.ok || !res.body) throw new Error("Tier 2 enrichment request failed");
 
@@ -433,16 +454,16 @@ export default function TableView({
     }
   }
 
-  async function runTier3() {
+  async function runTier3(targetIds: string[]) {
     if (tier1Running || tier2Running || tier3Running) return;
     setTier3Running(true);
-    setPendingTier3(new Set(accounts.filter((a) => a.domain).map((a) => a.id)));
+    setPendingTier3(new Set(targetIds));
 
     try {
       const res = await fetch("/api/enrich/tier3", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tableId: table.id }),
+        body: JSON.stringify({ tableId: table.id, accountIds: targetIds }),
       });
       if (!res.ok || !res.body) throw new Error("Tier 3 enrichment request failed");
 
@@ -453,6 +474,85 @@ export default function TableView({
       setTier3Running(false);
       setPendingTier3(new Set());
     }
+  }
+
+  /** Selected rows if any are ticked, otherwise rows tier `tier` hasn't run for yet — filtered to rows the tier can actually process. */
+  function computeRunTargets(tier: 1 | 2 | 3): { targetIds: string[]; selectionBased: boolean } {
+    const selectionBased = selectedIds.size > 0;
+    const base = selectionBased
+      ? accounts.filter((a) => selectedIds.has(a.id))
+      : accounts.filter((a) => tierEnrichedAt(a, tier) === null);
+
+    return { targetIds: base.filter((a) => isEligibleForTier(a, tier)).map((a) => a.id), selectionBased };
+  }
+
+  function handleRunClick(tier: 1 | 2 | 3) {
+    if (tier1Running || tier2Running || tier3Running) return;
+
+    const { targetIds, selectionBased } = computeRunTargets(tier);
+    if (targetIds.length === 0) {
+      toast.info(
+        selectionBased
+          ? "None of the selected rows are eligible for this step."
+          : "All rows already have this data — select rows to re-run.",
+      );
+      return;
+    }
+
+    setConfirmRun({ tier, targetIds, selectionBased });
+  }
+
+  function buildConfirmMessage({ tier, targetIds, selectionBased }: ConfirmRun): string {
+    const labels = tierOutputLabels(tier);
+    const fieldsText =
+      labels.length > 3
+        ? `${labels.slice(0, 3).join(", ")} and ${labels.length - 3} more field${labels.length - 3 === 1 ? "" : "s"}`
+        : labels.join(", ");
+
+    const rowText = selectionBased
+      ? `${targetIds.length} selected row${targetIds.length === 1 ? "" : "s"}`
+      : `${targetIds.length} row${targetIds.length === 1 ? "" : "s"} without existing data`;
+
+    const downstream =
+      tier === 1
+        ? " This will also clear existing Tier 2 and Tier 3 data for these rows."
+        : tier === 2
+          ? " This will also clear existing Tier 3 data for these rows."
+          : "";
+
+    return `You are about to generate ${fieldsText} for ${rowText}.${downstream} Continue?`;
+  }
+
+  async function executeRun() {
+    if (!confirmRun) return;
+    const { tier, targetIds } = confirmRun;
+    setConfirmRun(null);
+
+    if (tier === 1 || tier === 2) {
+      const idSet = new Set(targetIds);
+      const scores = await wipeDownstreamFields(table.id, targetIds, tier);
+      const nullFields: Record<string, null> = {};
+      for (const field of TIER_DOWNSTREAM_FIELDS[tier]) nullFields[field] = null;
+
+      setAccounts((prev) =>
+        prev.map((a) => {
+          if (!idSet.has(a.id)) return a;
+          const scoreResult = scores[a.id];
+          return {
+            ...a,
+            ...nullFields,
+            pass1: scoreResult?.pass1 ?? null,
+            score: scoreResult?.score ?? null,
+            score_confidence: scoreResult?.score_confidence ?? null,
+            score_flags: JSON.stringify(scoreResult?.score_flags ?? []),
+          } as Account;
+        }),
+      );
+    }
+
+    if (tier === 1) await runTier1(targetIds);
+    else if (tier === 2) await runTier2(targetIds);
+    else await runTier3(targetIds);
   }
 
   const allSelected = accounts.length > 0 && selectedIds.size === accounts.length;
@@ -499,7 +599,7 @@ export default function TableView({
         </div>
       )}
 
-      <div className="mb-4 flex h-9 items-center gap-3">
+      <div className="mb-4 flex min-h-9 items-center gap-3">
         {selectedIds.size > 0 &&
           (confirmingDelete ? (
             <>
@@ -528,6 +628,26 @@ export default function TableView({
               Delete
             </button>
           ))}
+
+        {confirmRun && (
+          <div className="flex flex-wrap items-center gap-3 rounded-md border border-blue-200 bg-blue-50 px-3 py-1.5 text-sm text-blue-900">
+            <span>{buildConfirmMessage(confirmRun)}</span>
+            <button
+              type="button"
+              onClick={executeRun}
+              className="shrink-0 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+            >
+              Continue
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmRun(null)}
+              className="shrink-0 rounded-md border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="overflow-auto rounded-md border border-gray-200 bg-white">
@@ -561,33 +681,41 @@ export default function TableView({
                     <span>{column.label}</span>
                     {column.tier === 1 && (
                       <RunIcon
-                        onClick={runTier1}
+                        onClick={() => handleRunClick(1)}
                         disabled={tier1Running || tier2Running || tier3Running}
                         loading={tier1Running}
-                        title="Run Tier 1 enrichment for all rows"
+                        title={
+                          selectedIds.size > 0
+                            ? "Run Tier 1 enrichment for selected rows"
+                            : "Run Tier 1 enrichment for rows missing data"
+                        }
                       />
                     )}
                     {column.tier === 2 && (
                       <RunIcon
-                        onClick={runTier2}
+                        onClick={() => handleRunClick(2)}
                         disabled={tier1Running || tier2Running || tier3Running || !hasHelpCentreUrl}
                         loading={tier2Running}
                         title={
-                          hasHelpCentreUrl
-                            ? "Run Tier 2 enrichment for all rows"
-                            : "Run Tier 1 first to discover help centres"
+                          !hasHelpCentreUrl
+                            ? "Run Tier 1 first to discover help centres"
+                            : selectedIds.size > 0
+                              ? "Run Tier 2 enrichment for selected rows"
+                              : "Run Tier 2 enrichment for rows missing data"
                         }
                       />
                     )}
                     {column.tier === 3 && TIER3_RUN_ICON_KEYS.has(column.key) && (
                       <RunIcon
-                        onClick={runTier3}
+                        onClick={() => handleRunClick(3)}
                         disabled={tier1Running || tier2Running || tier3Running || !hasTier2Run}
                         loading={tier3Running}
                         title={
-                          hasTier2Run
-                            ? "Run Tier 3 enrichment for all rows"
-                            : "Run Tier 2 first to count pages"
+                          !hasTier2Run
+                            ? "Run Tier 2 first to count pages"
+                            : selectedIds.size > 0
+                              ? "Run Tier 3 enrichment for selected rows"
+                              : "Run Tier 3 enrichment for rows missing data"
                         }
                       />
                     )}
