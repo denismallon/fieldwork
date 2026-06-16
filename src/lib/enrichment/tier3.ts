@@ -132,6 +132,7 @@ const CHANGELOG_PATH_GUESSES = [
   "/releases",
   "/release-notes",
   "/whats-new",
+  "/whatsnew",
   "/product-updates",
   "/updates",
 ];
@@ -162,7 +163,7 @@ function passesPrecheck(text: string): boolean {
   return CHANGELOG_KEYWORD_RE.test(text) || (text.match(DATE_LIKE_RE) ?? []).length >= 2;
 }
 
-async function discoverChangelog(domain: string | null, companyName: string | null): Promise<DiscoveryResult> {
+export async function discoverChangelog(domain: string | null, companyName: string | null): Promise<DiscoveryResult> {
   if (!domain) return { url: null, candidatesJson: null };
 
   const rootDomain = domain.replace(/^www\./i, "").toLowerCase();
@@ -170,7 +171,8 @@ async function discoverChangelog(domain: string | null, companyName: string | nu
   const origin = `https://${rootDomain}`;
   const candidates: ScoredCandidate[] = [];
 
-  // Step A: path guesses
+  // Step A: path guesses — accept directly on 200 OK (content may be SPA-rendered)
+  const pathCandidates: ScoredCandidate[] = [];
   for (const path of CHANGELOG_PATH_GUESSES) {
     try {
       const res = await fetchWithTimeout(`${origin}${path}`, { method: "HEAD" });
@@ -181,19 +183,34 @@ async function discoverChangelog(domain: string | null, companyName: string | nu
       // Skip if redirected to root
       const finalPath = new URL(finalUrl).pathname;
       if (finalPath === "/" || finalPath === "") continue;
-      candidates.push({ url: finalUrl, score: scoreCandidate(finalUrl, "", ""), source: "path" });
+      pathCandidates.push({ url: finalUrl, score: scoreCandidate(finalUrl, "", ""), source: "path" });
     } catch {
       // ignore individual path failures
     }
   }
 
+  // If any path guess hit, return the highest-scoring one immediately — no content precheck needed.
+  if (pathCandidates.length > 0) {
+    pathCandidates.sort((a, b) => b.score - a.score);
+    const top5Path = pathCandidates.slice(0, 5);
+    return { url: pathCandidates[0].url, candidatesJson: JSON.stringify(top5Path) };
+  }
+
   // Step A: Brave search, Step B: same-domain discipline
+  // Include domain in query to cut through generic company names (e.g. "Deed", "Maven").
+  // Skip root-level URLs — a homepage is never a changelog.
   if (companyName) {
     try {
       const search = getSearchProvider();
-      const results = await search.search(`"${companyName}" changelog`, 10);
+      const results = await search.search(`"${companyName}" ${rootDomain} changelog`, 10);
       for (const r of results) {
         if (!registrable || getDomain(r.url) !== registrable) continue;
+        try {
+          const p = new URL(r.url).pathname;
+          if (p === "/" || p === "") continue;
+        } catch {
+          continue;
+        }
         candidates.push({ url: r.url, score: scoreCandidate(r.url, r.title, r.description), source: "search" });
       }
     } catch (error) {
@@ -215,8 +232,13 @@ async function discoverChangelog(domain: string | null, companyName: string | nu
   const top5 = ranked.slice(0, 5);
   const candidatesJson = JSON.stringify(top5);
 
-  // Step D: cheap pre-check — walk ranked list until one passes
+  // Step D: content precheck on search results — walk ranked list until one passes.
+  // High-scoring candidates (path contains explicit changelog terms, score ≥ 3) are
+  // trusted on URL signal alone — their content may be SPA-rendered and return no text.
   for (const candidate of ranked) {
+    if (candidate.score >= 3) {
+      return { url: candidate.url, candidatesJson };
+    }
     try {
       const res = await fetchWithTimeout(candidate.url);
       if (!res?.ok) continue;
