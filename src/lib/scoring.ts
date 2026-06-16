@@ -54,7 +54,16 @@ function computeDriftRatio(account: Account, flags: string[]): number {
     flags.push("Low confidence Tier 3 analysis — verify manually");
   }
   if (velocity === "unknown" || velocity === null) {
-    flags.push("Release velocity unknown: no dated changelog found");
+    const ct = account.changelog_type;
+    if (ct === "news_blog") {
+      flags.push("Changelog URL is a news/blog page, not a release index — velocity unmeasured");
+    } else if (ct === "single_post") {
+      flags.push("Changelog URL is a single post, not the release index — velocity unmeasured");
+    } else if (ct === "not_a_changelog") {
+      flags.push("Detected changelog URL is not a changelog — velocity unmeasured");
+    } else {
+      flags.push("Release velocity unknown: no dated changelog found");
+    }
   }
 
   if (!velocity || velocity === "unknown" || !freshnessConfidence) {

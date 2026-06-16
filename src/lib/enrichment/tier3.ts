@@ -7,6 +7,7 @@ import { fetchWithTimeout, hostOf } from "./utils";
 
 export interface Tier3Result {
   changelog_url: string | null;
+  changelog_type: "release_index" | "news_blog" | "single_post" | "not_a_changelog" | "none" | null;
   release_velocity: "high" | "medium" | "low" | "unknown" | null;
   freshness_signal: "fresh" | "stale" | "very_stale" | "unknown" | null;
   freshness_confidence: "high" | "medium" | "low" | null;
@@ -14,6 +15,7 @@ export interface Tier3Result {
 }
 
 const FAILED_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
+  changelog_type: "none",
   release_velocity: "unknown",
   freshness_signal: "unknown",
   freshness_confidence: "low",
@@ -22,60 +24,61 @@ const FAILED_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
 
 /** No changelog was found, so velocity/freshness were never assessed — leave blank rather than "unknown". */
 const NO_CHANGELOG_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
+  changelog_type: "none",
   release_velocity: null,
   freshness_signal: null,
   freshness_confidence: null,
   tier3_rationale: null,
 };
 
-const SYSTEM_PROMPT = `You are analysing content extracted from a B2B SaaS company's help centre
-and changelog to assess two signals:
+const SYSTEM_PROMPT = `You are analysing content extracted from a B2B SaaS company's help centre and changelog to assess two signals: release velocity and content freshness.
 
-1. Release velocity - how frequently the company ships product changes,
-   based on the gaps between consecutive dated changelog/release entries.
-   Classify as: high (entries average 6 weeks or less apart), medium
-   (entries average 6 weeks to 4 months apart), low (entries average more
-   than 4 months apart), or unknown.
+You will be given today's date. All recency judgements must be made relative to that date.
 
-2. Content freshness - how recently the most relevant documentation was
-   updated, measured against the "Today's date" given in the user message.
-   Classify as: fresh (most recently dated entry is within 90 days before
-   today), stale (90-365 days before today), very_stale (over 365 days
-   before today), or unknown.
+## Release velocity
 
-Rules:
-- Base classifications only on evidence present in the content provided.
-  Do not infer, guess, or use general knowledge about the company.
-- Before using any retrieved page as evidence, check whether it actually
-  describes product changes, features, fixes, or documentation updates.
-  Marketing copy, press releases, blog posts, or announcements about the
-  business (funding, partnerships, awards, hiring) do NOT count as evidence
-  for either signal, even if dated - treat such content as absent.
-- Release velocity must be based on at least 2 qualifying dated entries
-  from within the 12 months before "Today's date". State the gap between
-  each consecutive pair of entries (in weeks/months), then classify on the
-  AVERAGE gap using the bands above. Entries older than 12 months may be
-  noted for context but must not drive the classification. If fewer than 2
-  qualifying entries fall within the last 12 months, release_velocity =
-  "unknown".
-- Content freshness must be based on the single most recently dated
-  qualifying entry across the changelog and article sample combined
-  (whichever is newer). Show "today - that date = N days" and map it
-  directly to the bands above - do not override this mapping with
-  narrative reasoning (e.g. "other evidence suggests ongoing activity").
-  If no qualifying dated entry exists anywhere, freshness_signal =
-  "unknown".
-- If all changelog dates appear to be the same (bulk migration artifact),
-  treat freshness as unknown and explain this in the rationale.
-- When in doubt between a specific classification and "unknown", choose
-  "unknown".
+First, classify what kind of page the changelog content actually is:
+- release_index: a structured list/index of product release notes or version history
+- news_blog: a blog or news category with company or product news, not a structured release log
+- single_post: an individual release note or announcement, not the full index
+- not_a_changelog: the content is not about product releases at all
+- none: no changelog content was provided
+
+Only assess velocity from a 'release_index'. For any other type, set release_velocity to 'unknown' — you cannot measure shipping cadence from a single post, a news blog, or an unrelated page.
+
+When you do have a release_index:
+1. Identify the SINGLE MOST RECENT entry date.
+2. Compute how long ago that was relative to today's date, in months.
+3. Classify velocity from RECENCY, not from how many entries you see. A page showing ten releases all from two years ago is LOW or unknown velocity, not high.
+   - most recent entry within ~1 month → high
+   - most recent entry within ~3 months → medium
+   - most recent entry older than ~3 months → low
+   - no dates extractable → unknown
+
+## Content freshness
+
+Classify how recently the help centre articles were updated, relative to today's date:
+- fresh: most content updated within 90 days
+- stale: 90–365 days
+- very_stale: over 365 days
+- unknown: insufficient evidence
+
+Two specific signals to weigh:
+- If release notes or articles contain crosslinks to other help articles or product pages (e.g. "read more about our new integration here"), this is a positive sign of an actively maintained help centre. Weigh it against a 'stale' classification.
+- If all article or changelog dates appear identical (a bulk migration artifact), treat freshness as 'unknown' and say so in the rationale.
+
+## Rules
+- Base every classification only on evidence present in the provided content. Never infer or guess.
+- Use 'unknown' freely when content is missing, sparse, or the wrong type.
+- Always reason from today's date for any recency judgement.
 
 Return a JSON object with exactly these fields:
 {
+  "changelog_type": "release_index|news_blog|single_post|not_a_changelog|none",
   "release_velocity": "high|medium|low|unknown",
   "freshness_signal": "fresh|stale|very_stale|unknown",
   "confidence": "high|medium|low",
-  "rationale": "2-3 sentences explaining the evidence behind each classification and any caveats."
+  "rationale": "2-3 sentences. State the most recent changelog date you found and how many months ago that is, the basis for the freshness call including any crosslink or migration-artifact observations, and any caveats."
 }`;
 
 export async function runTier3(account: Account): Promise<Tier3Result> {
@@ -92,7 +95,10 @@ export async function runTier3(account: Account): Promise<Tier3Result> {
     sitemap?.urls ? sampleUrls(sitemap.urls, account.help_centre_url ?? "", 5) : [],
   );
 
-  const analysis = await analyzeWithHaiku(account.domain, changelogContent, articleSample);
+  const raw = await analyzeWithHaiku(account.domain, changelogContent, articleSample);
+  // Belt-and-braces: if not a real release index, velocity cannot be measured regardless of what the model returned.
+  const analysis =
+    raw.changelog_type !== "release_index" ? { ...raw, release_velocity: "unknown" as const } : raw;
 
   return {
     changelog_url: changelogUrl,
@@ -300,12 +306,14 @@ async function extractArticleSample(urls: string[]): Promise<string> {
 // --- LLM analysis ------------------------------------------------------------
 
 interface HaikuAnalysis {
+  changelog_type: "release_index" | "news_blog" | "single_post" | "not_a_changelog" | "none";
   release_velocity: "high" | "medium" | "low" | "unknown";
   freshness_signal: "fresh" | "stale" | "very_stale" | "unknown";
   freshness_confidence: "high" | "medium" | "low";
   tier3_rationale: string;
 }
 
+const CHANGELOG_TYPES = new Set(["release_index", "news_blog", "single_post", "not_a_changelog", "none"]);
 const RELEASE_VELOCITIES = new Set(["high", "medium", "low", "unknown"]);
 const FRESHNESS_SIGNALS = new Set(["fresh", "stale", "very_stale", "unknown"]);
 const CONFIDENCE_VALUES = new Set(["high", "medium", "low"]);
@@ -349,6 +357,8 @@ function parseAnalysisJson(text: string): HaikuAnalysis {
   }
 
   if (
+    typeof parsed.changelog_type !== "string" ||
+    !CHANGELOG_TYPES.has(parsed.changelog_type) ||
     typeof parsed.release_velocity !== "string" ||
     !RELEASE_VELOCITIES.has(parsed.release_velocity) ||
     typeof parsed.freshness_signal !== "string" ||
@@ -362,6 +372,7 @@ function parseAnalysisJson(text: string): HaikuAnalysis {
   }
 
   return {
+    changelog_type: parsed.changelog_type as HaikuAnalysis["changelog_type"],
     release_velocity: parsed.release_velocity as HaikuAnalysis["release_velocity"],
     freshness_signal: parsed.freshness_signal as HaikuAnalysis["freshness_signal"],
     freshness_confidence: parsed.confidence as HaikuAnalysis["freshness_confidence"],
@@ -382,7 +393,7 @@ async function callHaiku(userPrompt: string): Promise<HaikuAnalysis> {
     },
     body: JSON.stringify({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 400,
+      max_tokens: 800,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: userPrompt }],
     }),

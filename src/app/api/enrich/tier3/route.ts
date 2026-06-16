@@ -10,6 +10,7 @@ export const maxDuration = 300;
 
 const FAILED_RESULT: Tier3Result = {
   changelog_url: null,
+  changelog_type: "none",
   release_velocity: "unknown",
   freshness_signal: "unknown",
   freshness_confidence: "low",
@@ -50,6 +51,7 @@ export async function POST(request: Request) {
         await db.execute({
           sql: `UPDATE accounts SET
               changelog_url = ?,
+              changelog_type = ?,
               release_velocity = ?,
               freshness_signal = ?,
               freshness_confidence = ?,
@@ -58,6 +60,7 @@ export async function POST(request: Request) {
             WHERE id = ?`,
           args: [
             tier3Result.changelog_url,
+            tier3Result.changelog_type,
             tier3Result.release_velocity,
             tier3Result.freshness_signal,
             tier3Result.freshness_confidence,
@@ -68,6 +71,7 @@ export async function POST(request: Request) {
         });
 
         send({ accountId: account.id, field: "changelog_url", value: tier3Result.changelog_url });
+        send({ accountId: account.id, field: "changelog_type", value: tier3Result.changelog_type });
         send({ accountId: account.id, field: "release_velocity", value: tier3Result.release_velocity });
         send({ accountId: account.id, field: "freshness_signal", value: tier3Result.freshness_signal });
         send({ accountId: account.id, field: "freshness_confidence", value: tier3Result.freshness_confidence });
