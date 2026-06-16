@@ -96,9 +96,11 @@ export async function runTier3(account: Account): Promise<Tier3Result> {
   );
 
   const raw = await analyzeWithHaiku(account.domain, changelogContent, articleSample);
-  // Belt-and-braces: if not a real release index, velocity cannot be measured regardless of what the model returned.
+  // No real release index → leave velocity/freshness/confidence blank rather than 'unknown'.
   const analysis =
-    raw.changelog_type !== "release_index" ? { ...raw, release_velocity: "unknown" as const } : raw;
+    raw.changelog_type !== "release_index"
+      ? { ...raw, release_velocity: null, freshness_signal: null, freshness_confidence: null }
+      : raw;
 
   return {
     changelog_url: changelogUrl,

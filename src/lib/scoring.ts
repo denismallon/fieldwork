@@ -44,7 +44,6 @@ const DRIFT_MATRIX: Record<string, Record<string, number>> = {
   low: { fresh: 0, stale: 5, very_stale: 10 },
 };
 
-/** Unknown Tier 3 signals collapse to the neutral drift midpoint. */
 function computeDriftRatio(account: Account, flags: string[]): number {
   const velocity = account.release_velocity;
   const freshness = account.freshness_signal;
@@ -61,15 +60,22 @@ function computeDriftRatio(account: Account, flags: string[]): number {
       flags.push("Changelog URL is a single post, not the release index — velocity unmeasured");
     } else if (ct === "not_a_changelog") {
       flags.push("Detected changelog URL is not a changelog — velocity unmeasured");
+    } else if (ct === "none" || velocity === null) {
+      flags.push("No changelog found — release/freshness not assessed");
     } else {
+      // release_index where dates weren't parseable
       flags.push("Release velocity unknown: no dated changelog found");
     }
   }
 
-  if (!velocity || velocity === "unknown" || !freshnessConfidence) {
+  // null = no real changelog present → 0 contribution (not the neutral 20-pt midpoint)
+  if (velocity === null || freshness === null) {
+    return 0;
+  }
+  // 'unknown' on a real release_index → neutral midpoint
+  if (velocity === "unknown" || freshness === "unknown" || !freshnessConfidence) {
     return 20;
   }
-  if (!freshness || freshness === "unknown") return 20;
 
   return DRIFT_MATRIX[velocity]?.[freshness] ?? 20;
 }

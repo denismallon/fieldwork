@@ -11,9 +11,9 @@ export const maxDuration = 300;
 const FAILED_RESULT: Tier3Result = {
   changelog_url: null,
   changelog_type: "none",
-  release_velocity: "unknown",
-  freshness_signal: "unknown",
-  freshness_confidence: "low",
+  release_velocity: null,
+  freshness_signal: null,
+  freshness_confidence: null,
   tier3_rationale: "LLM analysis failed — review manually.",
 };
 
