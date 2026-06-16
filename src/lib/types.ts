@@ -20,6 +20,7 @@ export interface EnrichmentFields {
   page_count_status: string | null;
   changelog_url: string | null;
   changelog_type: string | null;
+  changelog_candidates: string | null;
   release_velocity: string | null;
   freshness_signal: string | null;
   freshness_confidence: string | null;
@@ -81,6 +82,7 @@ export function rowToAccount(row: Row): Account {
     page_count_status: row.page_count_status === null ? null : String(row.page_count_status),
     changelog_url: row.changelog_url === null ? null : String(row.changelog_url),
     changelog_type: row.changelog_type === null ? null : String(row.changelog_type),
+    changelog_candidates: row.changelog_candidates === null ? null : String(row.changelog_candidates),
     release_velocity: row.release_velocity === null ? null : String(row.release_velocity),
     freshness_signal: row.freshness_signal === null ? null : String(row.freshness_signal),
     freshness_confidence: row.freshness_confidence === null ? null : String(row.freshness_confidence),

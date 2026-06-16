@@ -11,6 +11,7 @@ export const maxDuration = 300;
 const FAILED_RESULT: Tier3Result = {
   changelog_url: null,
   changelog_type: "none",
+  changelog_candidates: null,
   release_velocity: null,
   freshness_signal: null,
   freshness_confidence: null,
@@ -52,6 +53,7 @@ export async function POST(request: Request) {
           sql: `UPDATE accounts SET
               changelog_url = ?,
               changelog_type = ?,
+              changelog_candidates = ?,
               release_velocity = ?,
               freshness_signal = ?,
               freshness_confidence = ?,
@@ -61,6 +63,7 @@ export async function POST(request: Request) {
           args: [
             tier3Result.changelog_url,
             tier3Result.changelog_type,
+            tier3Result.changelog_candidates,
             tier3Result.release_velocity,
             tier3Result.freshness_signal,
             tier3Result.freshness_confidence,

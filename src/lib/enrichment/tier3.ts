@@ -1,20 +1,25 @@
 import * as cheerio from "cheerio";
 import type { CheerioAPI } from "cheerio";
+import { getDomain } from "tldts";
 import type { Account } from "../types";
-import { matchesProbe, pathOf, probeUnknownPath, type ProbeSignature } from "./helpCentre";
+import { getSearchProvider } from "../search";
 import { discoverSitemap } from "./sitemap";
-import { fetchWithTimeout, hostOf } from "./utils";
+import { fetchWithTimeout } from "./utils";
 
 export interface Tier3Result {
   changelog_url: string | null;
   changelog_type: "release_index" | "news_blog" | "single_post" | "not_a_changelog" | "none" | null;
+  changelog_candidates: string | null;
   release_velocity: "high" | "medium" | "low" | "unknown" | null;
   freshness_signal: "fresh" | "stale" | "very_stale" | "unknown" | null;
   freshness_confidence: "high" | "medium" | "low" | null;
   tier3_rationale: string | null;
 }
 
-const FAILED_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
+/** changelog_candidates is owned by the discovery step, not the LLM analysis. */
+type LlmAnalysis = Omit<Tier3Result, "changelog_url" | "changelog_candidates">;
+
+const FAILED_ANALYSIS: LlmAnalysis = {
   changelog_type: "none",
   release_velocity: "unknown",
   freshness_signal: "unknown",
@@ -22,8 +27,8 @@ const FAILED_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
   tier3_rationale: "LLM analysis failed — review manually.",
 };
 
-/** No changelog was found, so velocity/freshness were never assessed — leave blank rather than "unknown". */
-const NO_CHANGELOG_ANALYSIS: Omit<Tier3Result, "changelog_url"> = {
+/** No changelog was found — leave velocity/freshness blank rather than 'unknown'. */
+const NO_CHANGELOG_ANALYSIS: LlmAnalysis = {
   changelog_type: "none",
   release_velocity: null,
   freshness_signal: null,
@@ -83,11 +88,11 @@ Return a JSON object with exactly these fields:
 
 export async function runTier3(account: Account): Promise<Tier3Result> {
   const sitemap = account.help_centre_url ? await discoverSitemap(account.help_centre_url, account.platform) : null;
-  const discovery = await discoverChangelog(account.domain, sitemap?.urls ?? []);
+  const discovery = await discoverChangelog(account.domain, account.company_name);
   const changelogUrl = discovery.url;
 
   if (!changelogUrl) {
-    return { changelog_url: null, ...NO_CHANGELOG_ANALYSIS };
+    return { changelog_url: null, changelog_candidates: discovery.candidatesJson, ...NO_CHANGELOG_ANALYSIS };
   }
 
   const changelogContent = await extractChangelogContent(changelogUrl);
@@ -104,131 +109,127 @@ export async function runTier3(account: Account): Promise<Tier3Result> {
 
   return {
     changelog_url: changelogUrl,
+    changelog_candidates: discovery.candidatesJson,
     ...analysis,
   };
 }
 
-// --- Changelog URL discovery -------------------------------------------------
+// --- Changelog URL discovery (search-backed) ---------------------------------
 
-interface ChangelogDiscovery {
-  url: string | null;
-  method: "sitemap" | "path" | "embed" | null;
+interface ScoredCandidate {
+  url: string;
+  score: number;
+  source: "path" | "search";
 }
 
-const NO_CHANGELOG: ChangelogDiscovery = { url: null, method: null };
+interface DiscoveryResult {
+  url: string | null;
+  candidatesJson: string | null;
+}
 
-const CHANGELOG_PATHS = [
+const CHANGELOG_PATH_GUESSES = [
   "/changelog",
   "/releases",
-  "/whats-new",
-  "/updates",
   "/release-notes",
+  "/whats-new",
   "/product-updates",
-  "/new",
+  "/updates",
 ];
 
-const CHANGELOG_SITEMAP_KEYWORDS = ["changelog", "releasenotes", "whatsnew", "productupdates"];
+const SCORE_PATH_TERMS = ["changelog", "release-notes", "releases", "whats-new", "product-updates"];
+const DATED_POST_RE = /\/20\d{2}\/\d{1,2}\//;
+const DATE_LIKE_RE =
+  /\b(?:January|February|March|April|May|June|July|August|September|October|November|December|\d{1,2}\/\d{1,2}\/\d{2,4}|\d{4}-\d{2}-\d{2})\b/gi;
+const CHANGELOG_KEYWORD_RE = /\b(?:released|fixed|added|improved|new in|version|v\d+\.\d+)\b/i;
 
-const CHANGELOG_TOOL_SIGNATURES = [
-  /beamer\.io/i,
-  /headwayapp\.co/i,
-  /canny\.io/i,
-  /launchnotes\.io/i,
-  /announcekit\.app/i,
-];
-
-async function checkChangelogPath(url: string, probe: ProbeSignature | null): Promise<string | null> {
-  const res = await fetchWithTimeout(url, { method: "HEAD" });
-  if (!res || !res.ok) return null;
-
-  const finalUrl = res.url || url;
-  const finalPath = pathOf(finalUrl);
-  if (finalPath === "" || finalPath === "/") return null;
-  if (matchesProbe(res, probe)) return null;
-
-  return finalUrl;
-}
-
-/**
- * Checks each CHANGELOG_PATHS candidate and returns the first one that isn't a
- * generic redirect target. Some marketing sites bounce every unrecognized path
- * (e.g. /changelog, /releases, /new) to the same off-domain login/app page —
- * if 2+ distinct candidate paths land on the same other-host URL, that's a
- * login wall, not a path-specific changelog. Same-host duplicates (e.g. a
- * /release-notes alias that 301s to the canonical /changelog) are left alone.
- */
-async function findChangelogPath(rootDomain: string, probe: ProbeSignature | null): Promise<string | null> {
-  const origin = `https://${rootDomain}`;
-  const results: (string | null)[] = [];
-  for (const path of CHANGELOG_PATHS) {
-    results.push(await checkChangelogPath(`${origin}${path}`, probe));
-  }
-
-  const crossHostCounts = new Map<string, number>();
-  for (const url of results) {
-    if (url && hostOf(url) !== rootDomain) {
-      crossHostCounts.set(url, (crossHostCounts.get(url) ?? 0) + 1);
-    }
-  }
-
-  return results.find((url) => url && (crossHostCounts.get(url) ?? 0) <= 1) ?? null;
-}
-
-function normalizePath(path: string): string {
-  let decoded = path;
+function scoreCandidate(url: string, title: string, description: string): number {
+  let score = 0;
   try {
-    decoded = decodeURIComponent(path);
+    const path = new URL(url).pathname.toLowerCase();
+    if (SCORE_PATH_TERMS.some((t) => path.includes(t))) score += 3;
   } catch {
-    // leave malformed paths as-is
+    // ignore unparseable URLs
   }
-  return decoded.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const titleLower = title.toLowerCase();
+  if (SCORE_PATH_TERMS.some((t) => titleLower.includes(t))) score += 2;
+  if (DATED_POST_RE.test(url)) score -= 2;
+  if ((description.match(DATE_LIKE_RE) ?? []).length >= 1) score += 1;
+  if (CHANGELOG_KEYWORD_RE.test(description)) score += 1;
+  return score;
 }
 
-function findChangelogInSitemap(urls: string[]): string | null {
-  for (const keyword of CHANGELOG_SITEMAP_KEYWORDS) {
-    const match = urls.find((url) => normalizePath(pathOf(url)).includes(keyword));
-    if (match) return match;
-  }
-  return null;
+function passesPrecheck(text: string): boolean {
+  return CHANGELOG_KEYWORD_RE.test(text) || (text.match(DATE_LIKE_RE) ?? []).length >= 2;
 }
 
-function embedSources(html: string): string {
-  const $ = cheerio.load(html);
-  const sources: string[] = [];
-  $("script[src]").each((_, el) => {
-    const src = $(el).attr("src");
-    if (src) sources.push(src);
-  });
-  $("iframe[src]").each((_, el) => {
-    const src = $(el).attr("src");
-    if (src) sources.push(src);
-  });
-  return sources.join(" ").toLowerCase();
-}
-
-async function discoverChangelog(domain: string | null, helpCentreSitemapUrls: string[]): Promise<ChangelogDiscovery> {
-  const sitemapMatch = findChangelogInSitemap(helpCentreSitemapUrls);
-  if (sitemapMatch) return { url: sitemapMatch, method: "sitemap" };
-
-  if (!domain) return NO_CHANGELOG;
+async function discoverChangelog(domain: string | null, companyName: string | null): Promise<DiscoveryResult> {
+  if (!domain) return { url: null, candidatesJson: null };
 
   const rootDomain = domain.replace(/^www\./i, "").toLowerCase();
+  const registrable = getDomain(rootDomain);
   const origin = `https://${rootDomain}`;
-  const probe = await probeUnknownPath(rootDomain);
+  const candidates: ScoredCandidate[] = [];
 
-  const pathMatch = await findChangelogPath(rootDomain, probe);
-  if (pathMatch) return { url: pathMatch, method: "path" };
-
-  const homeRes = await fetchWithTimeout(`${origin}/`);
-  if (homeRes && homeRes.ok) {
-    const html = await homeRes.text();
-    const haystack = embedSources(html);
-    if (CHANGELOG_TOOL_SIGNATURES.some((sig) => sig.test(haystack))) {
-      return { url: homeRes.url || `${origin}/`, method: "embed" };
+  // Step A: path guesses
+  for (const path of CHANGELOG_PATH_GUESSES) {
+    try {
+      const res = await fetchWithTimeout(`${origin}${path}`, { method: "HEAD" });
+      if (!res?.ok) continue;
+      const finalUrl = res.url || `${origin}${path}`;
+      // Skip if redirected off-domain
+      if (registrable && getDomain(finalUrl) !== registrable) continue;
+      // Skip if redirected to root
+      const finalPath = new URL(finalUrl).pathname;
+      if (finalPath === "/" || finalPath === "") continue;
+      candidates.push({ url: finalUrl, score: scoreCandidate(finalUrl, "", ""), source: "path" });
+    } catch {
+      // ignore individual path failures
     }
   }
 
-  return NO_CHANGELOG;
+  // Step A: Brave search, Step B: same-domain discipline
+  if (companyName) {
+    try {
+      const search = getSearchProvider();
+      const results = await search.search(`"${companyName}" changelog`, 10);
+      for (const r of results) {
+        if (!registrable || getDomain(r.url) !== registrable) continue;
+        candidates.push({ url: r.url, score: scoreCandidate(r.url, r.title, r.description), source: "search" });
+      }
+    } catch (error) {
+      console.error("Changelog search failed", { domain, error });
+    }
+  }
+
+  if (candidates.length === 0) return { url: null, candidatesJson: null };
+
+  // Deduplicate by URL, keep highest score per URL
+  const byUrl = new Map<string, ScoredCandidate>();
+  for (const c of candidates) {
+    const existing = byUrl.get(c.url);
+    if (!existing || c.score > existing.score) byUrl.set(c.url, c);
+  }
+
+  // Step C: rank by score descending
+  const ranked = Array.from(byUrl.values()).sort((a, b) => b.score - a.score);
+  const top5 = ranked.slice(0, 5);
+  const candidatesJson = JSON.stringify(top5);
+
+  // Step D: cheap pre-check — walk ranked list until one passes
+  for (const candidate of ranked) {
+    try {
+      const res = await fetchWithTimeout(candidate.url);
+      if (!res?.ok) continue;
+      const text = await res.text();
+      if (passesPrecheck(text.slice(0, 5000))) {
+        return { url: candidate.url, candidatesJson };
+      }
+    } catch {
+      // try next
+    }
+  }
+
+  return { url: null, candidatesJson };
 }
 
 // --- Content extraction ------------------------------------------------------
@@ -417,7 +418,7 @@ async function analyzeWithHaiku(
   domain: string | null,
   changelogContent: string,
   articleSample: string,
-): Promise<Omit<Tier3Result, "changelog_url">> {
+): Promise<LlmAnalysis> {
   const userPrompt = buildUserPrompt(domain, changelogContent, articleSample);
 
   for (let attempt = 0; attempt < 2; attempt++) {

@@ -51,6 +51,7 @@ const ENRICHMENT_COLUMNS = [
   ["tier2_enriched_at", "INTEGER"],
   ["tier3_enriched_at", "INTEGER"],
   ["changelog_type", "TEXT"],
+  ["changelog_candidates", "TEXT"],
 ];
 
 const tableInfo = await client.execute("PRAGMA table_info(accounts)");

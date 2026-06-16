@@ -118,13 +118,14 @@ export const TIER_DOWNSTREAM_FIELDS: Record<1 | 2, string[]> = {
     "tier2_enriched_at",
     "changelog_url",
     "changelog_type",
+    "changelog_candidates",
     "release_velocity",
     "freshness_signal",
     "freshness_confidence",
     "tier3_rationale",
     "tier3_enriched_at",
   ],
-  2: ["changelog_url", "changelog_type", "release_velocity", "freshness_signal", "freshness_confidence", "tier3_rationale", "tier3_enriched_at"],
+  2: ["changelog_url", "changelog_type", "changelog_candidates", "release_velocity", "freshness_signal", "freshness_confidence", "tier3_rationale", "tier3_enriched_at"],
 };
 
 /** Labels of the real (non-derived) fields a tier generates, for confirmation dialogs. */
