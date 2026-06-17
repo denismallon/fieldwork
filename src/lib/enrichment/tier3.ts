@@ -134,7 +134,7 @@ export async function runTier3(account: Account): Promise<Tier3Result> {
 interface ScoredCandidate {
   url: string;
   score: number;
-  source: "search";
+  source: "help_surface" | "broad";
 }
 
 interface DiscoveryResult {
@@ -201,13 +201,17 @@ export async function discoverChangelog(
   }
 
   const search = getSearchProvider();
-  const allResults: Awaited<ReturnType<typeof search.search>> = [];
 
-  // Q1: help-surface — constrained to the known help domain
+  type TaggedResult = Awaited<ReturnType<typeof search.search>>[number] & {
+    source: ScoredCandidate["source"];
+  };
+  const allResults: TaggedResult[] = [];
+
+  // Q1: help-surface — constrained to the known help domain (may be on a third-party platform)
   if (helpDomain) {
     try {
       const r = await search.search(`site:${helpDomain} changelog release notes`, 10);
-      allResults.push(...r);
+      allResults.push(...r.map((x) => ({ ...x, source: "help_surface" as const })));
     } catch (error) {
       console.error("Changelog help-surface search failed", { domain, error });
     }
@@ -217,7 +221,7 @@ export async function discoverChangelog(
   if (companyName) {
     try {
       const r = await search.search(`"${companyName}" ${rootDomain} changelog release notes`, 10);
-      allResults.push(...r);
+      allResults.push(...r.map((x) => ({ ...x, source: "broad" as const })));
     } catch (error) {
       console.error("Changelog broad search failed", { domain, error });
     }
@@ -225,14 +229,17 @@ export async function discoverChangelog(
 
   const candidates: ScoredCandidate[] = [];
   for (const r of allResults) {
-    if (!registrable || getDomain(r.url) !== registrable) continue;
+    // Q1 results are already site:-constrained to helpDomain — trust them even if the help
+    // centre is hosted on a third-party platform domain (e.g. acme.zendesk.com).
+    // Q2 results are unconstrained, so filter to the company's registrable domain only.
+    if (r.source === "broad" && (!registrable || getDomain(r.url) !== registrable)) continue;
     try {
       const p = new URL(r.url).pathname;
       if (p === "/" || p === "") continue;
     } catch {
       continue;
     }
-    candidates.push({ url: r.url, score: scoreCandidate(r.url, r.title, r.description), source: "search" });
+    candidates.push({ url: r.url, score: scoreCandidate(r.url, r.title, r.description), source: r.source });
   }
 
   if (candidates.length === 0) return { url: null, candidatesJson: null };
