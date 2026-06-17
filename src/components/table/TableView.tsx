@@ -459,15 +459,20 @@ export default function TableView({
     setTier3Running(true);
     setPendingTier3(new Set(targetIds));
 
+    // Tier 3 is slow (2 Brave searches + LLM per row). Chunk into batches of 20
+    // so each request stays well under Vercel's 300s function timeout.
+    const CHUNK = 20;
     try {
-      const res = await fetch("/api/enrich/tier3", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tableId: table.id, accountIds: targetIds }),
-      });
-      if (!res.ok || !res.body) throw new Error("Tier 3 enrichment request failed");
-
-      await consumeEventStream(res, (event) => applyEnrichmentEvent(event, setPendingTier3));
+      for (let i = 0; i < targetIds.length; i += CHUNK) {
+        const batch = targetIds.slice(i, i + CHUNK);
+        const res = await fetch("/api/enrich/tier3", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tableId: table.id, accountIds: batch }),
+        });
+        if (!res.ok || !res.body) throw new Error("Tier 3 enrichment request failed");
+        await consumeEventStream(res, (event) => applyEnrichmentEvent(event, setPendingTier3));
+      }
     } catch {
       toast.error("Tier 3 enrichment failed.");
     } finally {
