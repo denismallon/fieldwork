@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { FIXED_COLUMNS, ENRICHMENT_COLUMNS, TIER_DOWNSTREAM_FIELDS, tierOutputLabels, type EnrichmentColumnDef } from "@/lib/columns";
@@ -293,6 +293,7 @@ export default function TableView({
   const [sortDirection, setSortDirection] = useState<SortDirection>("asc");
 
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const lastCheckedIndex = useRef<number | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const duplicateCount = initialDuplicateCount;
 
@@ -335,15 +336,29 @@ export default function TableView({
     }
   }
 
-  function toggleRow(id: string) {
+  function toggleRow(id: string, index: number, shiftKey: boolean) {
     setConfirmingDelete(false);
     setConfirmRun(null);
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+
+    if (shiftKey && lastCheckedIndex.current !== null) {
+      const start = Math.min(lastCheckedIndex.current, index);
+      const end = Math.max(lastCheckedIndex.current, index);
+      const rangeIds = sortedAccounts.slice(start, end + 1).map((a) => a.id);
+      const selecting = !selectedIds.has(id);
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        for (const rid of rangeIds) selecting ? next.add(rid) : next.delete(rid);
+        return next;
+      });
+    } else {
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+      lastCheckedIndex.current = index;
+    }
   }
 
   function toggleAll() {
@@ -732,7 +747,7 @@ export default function TableView({
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {sortedAccounts.map((account) => (
+            {sortedAccounts.map((account, index) => (
               <tr
                 key={account.id}
                 className={selectedIds.has(account.id) ? "bg-gray-50" : undefined}
@@ -745,7 +760,7 @@ export default function TableView({
                   <input
                     type="checkbox"
                     checked={selectedIds.has(account.id)}
-                    onChange={() => toggleRow(account.id)}
+                    onChange={(e) => toggleRow(account.id, index, e.nativeEvent instanceof MouseEvent && e.nativeEvent.shiftKey)}
                     aria-label={`Select ${account.company_name ?? "row"}`}
                   />
                 </td>
