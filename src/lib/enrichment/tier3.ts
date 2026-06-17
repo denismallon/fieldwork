@@ -27,15 +27,6 @@ const FAILED_ANALYSIS: LlmAnalysis = {
   tier3_rationale: "LLM analysis failed — review manually.",
 };
 
-/** No changelog was found — leave velocity/freshness blank rather than 'unknown'. */
-const NO_CHANGELOG_ANALYSIS: LlmAnalysis = {
-  changelog_type: "none",
-  release_velocity: null,
-  freshness_signal: null,
-  freshness_confidence: null,
-  tier3_rationale: null,
-};
-
 const SYSTEM_PROMPT = `You are analysing content extracted from a B2B SaaS company's help centre and changelog to assess two signals: release velocity and content freshness.
 
 You will be given today's date. All recency judgements must be made relative to that date.
@@ -87,12 +78,36 @@ Return a JSON object with exactly these fields:
 }`;
 
 export async function runTier3(account: Account): Promise<Tier3Result> {
-  const sitemap = account.help_centre_url ? await discoverSitemap(account.help_centre_url, account.platform) : null;
-  const discovery = await discoverChangelog(account.domain, account.company_name);
+  // Gate: only rows with a found help centre that passed Pass 1
+  if (account.help_centre_url_status !== "found" || account.pass1 !== 1) {
+    return {
+      changelog_url: null,
+      changelog_type: null,
+      changelog_candidates: null,
+      release_velocity: null,
+      freshness_signal: null,
+      freshness_confidence: null,
+      tier3_rationale: null,
+    };
+  }
+
+  const sitemap = account.help_centre_url
+    ? await discoverSitemap(account.help_centre_url, account.platform)
+    : null;
+
+  const discovery = await discoverChangelog(account.domain, account.company_name, account.help_centre_url);
   const changelogUrl = discovery.url;
 
   if (!changelogUrl) {
-    return { changelog_url: null, changelog_candidates: discovery.candidatesJson, ...NO_CHANGELOG_ANALYSIS };
+    return {
+      changelog_url: null,
+      changelog_candidates: discovery.candidatesJson,
+      changelog_type: "none",
+      release_velocity: null,
+      freshness_signal: null,
+      freshness_confidence: null,
+      tier3_rationale: "No structured changelog found — release and freshness not assessed.",
+    };
   }
 
   const changelogContent = await extractChangelogContent(changelogUrl);
@@ -101,7 +116,7 @@ export async function runTier3(account: Account): Promise<Tier3Result> {
   );
 
   const raw = await analyzeWithHaiku(account.domain, changelogContent, articleSample);
-  // No real release index → leave velocity/freshness/confidence blank rather than 'unknown'.
+  // Coupling restored: non-release-index → null all three signals
   const analysis =
     raw.changelog_type !== "release_index"
       ? { ...raw, release_velocity: null, freshness_signal: null, freshness_confidence: null }
@@ -119,7 +134,7 @@ export async function runTier3(account: Account): Promise<Tier3Result> {
 interface ScoredCandidate {
   url: string;
   score: number;
-  source: "path" | "search";
+  source: "search";
 }
 
 interface DiscoveryResult {
@@ -127,118 +142,114 @@ interface DiscoveryResult {
   candidatesJson: string | null;
 }
 
-const CHANGELOG_PATH_GUESSES = [
-  "/changelog",
-  "/releases",
-  "/release-notes",
-  "/whats-new",
-  "/whatsnew",
-  "/product-updates",
-  "/updates",
-];
-
-const SCORE_PATH_TERMS = ["changelog", "release-notes", "releases", "whats-new", "product-updates"];
+const SCORE_PATH_TERMS = ["changelog", "release-notes", "releases", "whats-new", "whatsnew"];
+const HELP_SUBDOMAIN_RE = /^(?:help|support|docs|developer|dev|kb)\./i;
+const MARKETING_PATH_RE =
+  /\/(?:blog|news|press|press-releases|resources|company-news|careers|courses|policies|wp-content|what-we-do|case-studies)(?:\/|$)/i;
 const DATED_POST_RE = /\/20\d{2}\/\d{1,2}\//;
 const DATE_LIKE_RE =
   /\b(?:January|February|March|April|May|June|July|August|September|October|November|December|\d{1,2}\/\d{1,2}\/\d{2,4}|\d{4}-\d{2}-\d{2})\b/gi;
 const CHANGELOG_KEYWORD_RE = /\b(?:released|fixed|added|improved|new in|version|v\d+\.\d+)\b/i;
+const VERSION_MARKER_RE = /\bv\d+\.\d+/gi;
 
 function scoreCandidate(url: string, title: string, description: string): number {
   let score = 0;
   try {
-    const path = new URL(url).pathname.toLowerCase();
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+    if (HELP_SUBDOMAIN_RE.test(host)) score += 5;
     if (SCORE_PATH_TERMS.some((t) => path.includes(t))) score += 3;
+    if (MARKETING_PATH_RE.test(path)) score -= 5;
+    if (DATED_POST_RE.test(url)) score -= 3;
   } catch {
     // ignore unparseable URLs
   }
   const titleLower = title.toLowerCase();
   if (SCORE_PATH_TERMS.some((t) => titleLower.includes(t))) score += 2;
-  if (DATED_POST_RE.test(url)) score -= 2;
-  if ((description.match(DATE_LIKE_RE) ?? []).length >= 1) score += 1;
   if (CHANGELOG_KEYWORD_RE.test(description)) score += 1;
   return score;
 }
 
 function passesPrecheck(text: string): boolean {
-  return CHANGELOG_KEYWORD_RE.test(text) || (text.match(DATE_LIKE_RE) ?? []).length >= 2;
+  const dateMatches = text.match(DATE_LIKE_RE) ?? [];
+  const distinctDates = new Set(dateMatches.map((d) => d.toLowerCase())).size;
+  if (distinctDates >= 3) return true;
+
+  const versionMatches = text.match(VERSION_MARKER_RE) ?? [];
+  const distinctVersions = new Set(versionMatches.map((v) => v.toLowerCase())).size;
+  return distinctVersions >= 2;
 }
 
-export async function discoverChangelog(domain: string | null, companyName: string | null): Promise<DiscoveryResult> {
+export async function discoverChangelog(
+  domain: string | null,
+  companyName: string | null,
+  helpCentreUrl: string | null,
+): Promise<DiscoveryResult> {
   if (!domain) return { url: null, candidatesJson: null };
 
   const rootDomain = domain.replace(/^www\./i, "").toLowerCase();
   const registrable = getDomain(rootDomain);
-  const origin = `https://${rootDomain}`;
-  const candidates: ScoredCandidate[] = [];
 
-  // Step A: path guesses — accept directly on 200 OK (content may be SPA-rendered)
-  const pathCandidates: ScoredCandidate[] = [];
-  for (const path of CHANGELOG_PATH_GUESSES) {
+  let helpDomain: string | null = null;
+  if (helpCentreUrl) {
     try {
-      const res = await fetchWithTimeout(`${origin}${path}`, { method: "HEAD" });
-      if (!res?.ok) continue;
-      const finalUrl = res.url || `${origin}${path}`;
-      // Skip if redirected off-domain
-      if (registrable && getDomain(finalUrl) !== registrable) continue;
-      // Skip if redirected to root
-      const finalPath = new URL(finalUrl).pathname;
-      if (finalPath === "/" || finalPath === "") continue;
-      pathCandidates.push({ url: finalUrl, score: scoreCandidate(finalUrl, "", ""), source: "path" });
+      helpDomain = new URL(helpCentreUrl).hostname;
     } catch {
-      // ignore individual path failures
+      // ignore
     }
   }
 
-  // If any path guess hit, return the highest-scoring one immediately — no content precheck needed.
-  if (pathCandidates.length > 0) {
-    pathCandidates.sort((a, b) => b.score - a.score);
-    const top5Path = pathCandidates.slice(0, 5);
-    return { url: pathCandidates[0].url, candidatesJson: JSON.stringify(top5Path) };
+  const search = getSearchProvider();
+  const allResults: Awaited<ReturnType<typeof search.search>> = [];
+
+  // Q1: help-surface — constrained to the known help domain
+  if (helpDomain) {
+    try {
+      const r = await search.search(`site:${helpDomain} changelog release notes`, 10);
+      allResults.push(...r);
+    } catch (error) {
+      console.error("Changelog help-surface search failed", { domain, error });
+    }
   }
 
-  // Step A: Brave search, Step B: same-domain discipline
-  // Include domain in query to cut through generic company names (e.g. "Deed", "Maven").
-  // Skip root-level URLs — a homepage is never a changelog.
+  // Q2: broad — quoted company name + root domain to cut through generic names
   if (companyName) {
     try {
-      const search = getSearchProvider();
-      const results = await search.search(`"${companyName}" ${rootDomain} changelog`, 10);
-      for (const r of results) {
-        if (!registrable || getDomain(r.url) !== registrable) continue;
-        try {
-          const p = new URL(r.url).pathname;
-          if (p === "/" || p === "") continue;
-        } catch {
-          continue;
-        }
-        candidates.push({ url: r.url, score: scoreCandidate(r.url, r.title, r.description), source: "search" });
-      }
+      const r = await search.search(`"${companyName}" ${rootDomain} changelog release notes`, 10);
+      allResults.push(...r);
     } catch (error) {
-      console.error("Changelog search failed", { domain, error });
+      console.error("Changelog broad search failed", { domain, error });
     }
+  }
+
+  const candidates: ScoredCandidate[] = [];
+  for (const r of allResults) {
+    if (!registrable || getDomain(r.url) !== registrable) continue;
+    try {
+      const p = new URL(r.url).pathname;
+      if (p === "/" || p === "") continue;
+    } catch {
+      continue;
+    }
+    candidates.push({ url: r.url, score: scoreCandidate(r.url, r.title, r.description), source: "search" });
   }
 
   if (candidates.length === 0) return { url: null, candidatesJson: null };
 
-  // Deduplicate by URL, keep highest score per URL
+  // Deduplicate by URL, keep highest score
   const byUrl = new Map<string, ScoredCandidate>();
   for (const c of candidates) {
     const existing = byUrl.get(c.url);
     if (!existing || c.score > existing.score) byUrl.set(c.url, c);
   }
 
-  // Step C: rank by score descending
   const ranked = Array.from(byUrl.values()).sort((a, b) => b.score - a.score);
   const top5 = ranked.slice(0, 5);
   const candidatesJson = JSON.stringify(top5);
 
-  // Step D: content precheck on search results — walk ranked list until one passes.
-  // High-scoring candidates (path contains explicit changelog terms, score ≥ 3) are
-  // trusted on URL signal alone — their content may be SPA-rendered and return no text.
-  for (const candidate of ranked) {
-    if (candidate.score >= 3) {
-      return { url: candidate.url, candidatesJson };
-    }
+  // Content precheck — walk top 5, no trust-without-fetch
+  for (const candidate of top5) {
     try {
       const res = await fetchWithTimeout(candidate.url);
       if (!res?.ok) continue;

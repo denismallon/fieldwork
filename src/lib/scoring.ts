@@ -49,31 +49,27 @@ function computeDriftRatio(account: Account, flags: string[]): number {
   const freshness = account.freshness_signal;
   const freshnessConfidence = account.freshness_confidence;
 
-  if (freshnessConfidence === "low") {
-    flags.push("Low confidence Tier 3 analysis — verify manually");
-  }
-  if (velocity === "unknown" || velocity === null) {
-    const ct = account.changelog_type;
-    if (ct === "news_blog") {
-      flags.push("Changelog URL is a news/blog page, not a release index — velocity unmeasured");
-    } else if (ct === "single_post") {
-      flags.push("Changelog URL is a single post, not the release index — velocity unmeasured");
-    } else if (ct === "not_a_changelog") {
-      flags.push("Detected changelog URL is not a changelog — velocity unmeasured");
-    } else if (ct === "none" || velocity === null) {
-      flags.push("No changelog found — release/freshness not assessed");
-    } else {
-      // release_index where dates weren't parseable
-      flags.push("Release velocity unknown: no dated changelog found");
-    }
-  }
-
-  // null = no real changelog present → 0 contribution (not the neutral 20-pt midpoint)
+  // No valid signals — no changelog found, or LLM classified it as non-release-index
   if (velocity === null || freshness === null) {
+    if (account.changelog_url === null) {
+      flags.push("No structured changelog found — release/freshness not assessed");
+    } else {
+      flags.push("Detected changelog is not a valid release index — not assessed");
+    }
     return 0;
   }
-  // 'unknown' on a real release_index → neutral midpoint
-  if (velocity === "unknown" || freshness === "unknown" || !freshnessConfidence) {
+
+  // Migration artifact — confidence marked unmeasurable
+  if (freshnessConfidence === "unmeasurable") {
+    flags.push("Freshness unmeasurable: likely migration artifact — verify manually");
+    return 20;
+  }
+
+  // Unknown signals on a real release_index → neutral midpoint
+  if (velocity === "unknown" || freshness === "unknown") {
+    if (velocity === "unknown") {
+      flags.push("Release velocity unknown: no dated entries in changelog");
+    }
     return 20;
   }
 
@@ -81,13 +77,18 @@ function computeDriftRatio(account: Account, flags: string[]): number {
 }
 
 function computeScoreConfidence(account: Account): "high" | "medium" | "low" {
-  if (
-    account.freshness_confidence === "high" ||
-    account.freshness_confidence === "medium" ||
-    account.freshness_confidence === "low"
-  ) {
-    return account.freshness_confidence;
-  }
+  const fc = account.freshness_confidence;
+  const rv = account.release_velocity;
+
+  // All three signals null — no valid changelog assessment
+  if (fc === null && rv === null && account.freshness_signal === null) return "low";
+
+  if (fc === "unmeasurable") return "low";
+
+  if ((fc === "high" || fc === "medium") && rv !== "unknown") return "high";
+
+  if (fc === "low" || rv === "unknown") return "medium";
+
   return "low";
 }
 

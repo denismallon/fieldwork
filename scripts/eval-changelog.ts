@@ -157,7 +157,7 @@ async function main() {
     let found: string | null = null;
     let error: string | null = null;
     try {
-      const result = await discoverChangelog(domain, company);
+      const result = await discoverChangelog(domain, company, null);
       found = result.url;
     } catch (e) {
       error = e instanceof Error ? e.message.slice(0, 40) : String(e);
