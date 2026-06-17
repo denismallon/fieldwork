@@ -78,8 +78,8 @@ Return a JSON object with exactly these fields:
 }`;
 
 export async function runTier3(account: Account): Promise<Tier3Result> {
-  // Gate: skip rows with no help centre, or those that explicitly failed Pass 1
-  if (account.help_centre_url_status !== "found" || account.pass1 === 0) {
+  // Gate: skip rows with no help centre URL
+  if (!account.help_centre_url) {
     return {
       changelog_url: null,
       changelog_type: null,
