@@ -1,6 +1,6 @@
 import * as cheerio from "cheerio";
 import type { CheerioAPI } from "cheerio";
-import { getDomain } from "tldts";
+import { parse as parseDomain } from "tldts";
 import type { Account } from "../types";
 import { getSearchProvider } from "../search";
 import { discoverSitemap } from "./sitemap";
@@ -151,6 +151,44 @@ const CHANGELOG_KEYWORD_RE = /\b(?:released|fixed|added|improved|new in|version|
 // Broader check for the Brave-supplied title — catches "Release notes", "What's New", etc.
 const CHANGELOG_TITLE_RE =
   /\b(?:changelog|change\s+log|release\s+notes?|releases|what'?s\s+new|product\s+updates?)\b/i;
+
+const CHANGELOG_PLATFORMS = new Set([
+  "featurebase.app",
+  "headwayapp.co",
+  "canny.io",
+  "launchnotes.io",
+  "announcekit.app",
+  "beamer.io",
+  "release.so",
+  "noticeable.io",
+  "releasenotes.io",
+  "changefeed.io",
+  "releasebell.com",
+  "hellonext.co",
+  "sleekplan.co",
+  "productstash.io",
+]);
+
+function isAllowedDomain(candidateUrl: string, accountDomain: string): boolean {
+  const candidate = parseDomain(candidateUrl);
+  const account = parseDomain(accountDomain);
+
+  // Tier A — same registrable domain (eTLD+1)
+  if (candidate.domain && account.domain && candidate.domain === account.domain) return true;
+
+  // Tier B — same SLD (handles TLD variants: volopay.co ↔ volopay.com)
+  if (
+    candidate.domainWithoutSuffix &&
+    account.domainWithoutSuffix &&
+    candidate.domainWithoutSuffix === account.domainWithoutSuffix
+  ) return true;
+
+  // Tier C — known changelog platform (featurebase.app, headwayapp.co, etc.)
+  if (candidate.domain && CHANGELOG_PLATFORMS.has(candidate.domain)) return true;
+
+  return false;
+}
+
 function hasChangelogSignal(url: string, title: string): boolean {
   try {
     const path = new URL(url).pathname.toLowerCase();
@@ -186,7 +224,6 @@ export async function discoverChangelog(
   if (!domain) return { url: null, candidatesJson: null };
 
   const rootDomain = domain.replace(/^www\./i, "").toLowerCase();
-  const registrable = getDomain(rootDomain);
 
   let helpDomain: string | null = null;
   if (helpCentreUrl) {
@@ -226,10 +263,9 @@ export async function discoverChangelog(
 
   const candidates: ScoredCandidate[] = [];
   for (const r of allResults) {
-    // Q1 results are already site:-constrained to helpDomain — trust them even if the help
-    // centre is hosted on a third-party platform domain (e.g. acme.zendesk.com).
-    // Q2 results are unconstrained, so filter to the company's registrable domain only.
-    if (r.source === "broad" && (!registrable || getDomain(r.url) !== registrable)) continue;
+    // Q1 results are already site:-constrained to helpDomain — trust them unconditionally.
+    // Q2 results are unconstrained; isAllowedDomain enforces the four-tier allow-list.
+    if (r.source === "broad" && !isAllowedDomain(r.url, rootDomain)) continue;
     try {
       const p = new URL(r.url).pathname;
       if (p === "/" || p === "") continue;
