@@ -147,10 +147,17 @@ const HELP_SUBDOMAIN_RE = /^(?:help|support|docs|developer|dev|kb)\./i;
 const MARKETING_PATH_RE =
   /\/(?:blog|news|press|press-releases|resources|company-news|careers|courses|policies|wp-content|what-we-do|case-studies)(?:\/|$)/i;
 const DATED_POST_RE = /\/20\d{2}\/\d{1,2}\//;
-const DATE_LIKE_RE =
-  /\b(?:January|February|March|April|May|June|July|August|September|October|November|December|\d{1,2}\/\d{1,2}\/\d{2,4}|\d{4}-\d{2}-\d{2})\b/gi;
 const CHANGELOG_KEYWORD_RE = /\b(?:released|fixed|added|improved|new in|version|v\d+\.\d+)\b/i;
-const VERSION_MARKER_RE = /\bv\d+\.\d+/gi;
+// Broader check for the Brave-supplied title — catches "Release notes", "What's New", etc.
+const CHANGELOG_TITLE_RE =
+  /\b(?:changelog|change\s+log|release\s+notes?|releases|what'?s\s+new|product\s+updates?)\b/i;
+function hasChangelogSignal(url: string, title: string): boolean {
+  try {
+    const path = new URL(url).pathname.toLowerCase();
+    if (SCORE_PATH_TERMS.some((t) => path.includes(t))) return true;
+  } catch { /**/ }
+  return CHANGELOG_TITLE_RE.test(title);
+}
 
 function scoreCandidate(url: string, title: string, description: string): number {
   let score = 0;
@@ -169,16 +176,6 @@ function scoreCandidate(url: string, title: string, description: string): number
   if (SCORE_PATH_TERMS.some((t) => titleLower.includes(t))) score += 2;
   if (CHANGELOG_KEYWORD_RE.test(description)) score += 1;
   return score;
-}
-
-function passesPrecheck(text: string): boolean {
-  const dateMatches = text.match(DATE_LIKE_RE) ?? [];
-  const distinctDates = new Set(dateMatches.map((d) => d.toLowerCase())).size;
-  if (distinctDates >= 3) return true;
-
-  const versionMatches = text.match(VERSION_MARKER_RE) ?? [];
-  const distinctVersions = new Set(versionMatches.map((v) => v.toLowerCase())).size;
-  return distinctVersions >= 2;
 }
 
 export async function discoverChangelog(
@@ -239,6 +236,9 @@ export async function discoverChangelog(
     } catch {
       continue;
     }
+    // Require a changelog signal in the URL path or Brave-supplied title to avoid
+    // accepting pages that score well only due to being on a help subdomain.
+    if (!hasChangelogSignal(r.url, r.title)) continue;
     candidates.push({ url: r.url, score: scoreCandidate(r.url, r.title, r.description), source: r.source });
   }
 
@@ -255,15 +255,11 @@ export async function discoverChangelog(
   const top5 = ranked.slice(0, 5);
   const candidatesJson = JSON.stringify(top5);
 
-  // Content precheck — walk top 5, no trust-without-fetch
+  // Liveness check — walk top 5, skip 404s and network failures
   for (const candidate of top5) {
     try {
-      const res = await fetchWithTimeout(candidate.url);
-      if (!res?.ok) continue;
-      const text = await res.text();
-      if (passesPrecheck(text.slice(0, 5000))) {
-        return { url: candidate.url, candidatesJson };
-      }
+      const res = await fetchWithTimeout(candidate.url, { method: "HEAD" });
+      if (res?.ok) return { url: candidate.url, candidatesJson };
     } catch {
       // try next
     }
